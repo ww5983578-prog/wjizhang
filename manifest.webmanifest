@@ -1,0 +1,78 @@
+{
+  "id": "./",
+  "name": "w记账 · 顺手记，明白赚",
+  "short_name": "w记账",
+  "description": "给倒手生意用的轻量账本：记录成本和卖价，自动算利润、月度收益和在售库存；内置本地小助手奶娃。数据只保存在本机。",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#F4F1E8",
+  "theme_color": "#F4F1E8",
+  "categories": ["finance", "productivity", "business"],
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "问奶娃",
+      "short_name": "问奶娃",
+      "description": "查本月利润、库存，或让奶娃帮你记一单",
+      "url": "./?action=assistant",
+      "icons": [
+        {
+          "src": "./icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "记一单",
+      "short_name": "记一单",
+      "description": "记录一笔已卖出的账目",
+      "url": "./?action=new",
+      "icons": [
+        {
+          "src": "./icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "记库存",
+      "short_name": "记库存",
+      "description": "只记成本，先放进在售库存",
+      "url": "./?action=stock",
+      "icons": [
+        {
+          "src": "./icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    }
+  ]
+}

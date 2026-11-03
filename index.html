@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="format-detection" content="telephone=no">
+  <meta name="color-scheme" content="light">
+  <title>w记账 · 顺手记，明白赚</title>
+  <meta name="description" content="w记账：给倒手生意用的轻量账本。记录成本和卖价，自动算每单利润、月度收益和在售库存；内置本地小助手奶娃。数据只保存在本机。">
+  <meta name="theme-color" content="#F4F1E8">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="application-name" content="w记账">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="w记账">
+  <link rel="manifest" href="./manifest.webmanifest?v=1.1.2">
+  <link rel="icon" type="image/svg+xml" href="./icons/favicon.svg">
+  <link rel="icon" type="image/png" sizes="64x64" href="./icons/favicon-64.png">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="./styles.css?v=1.1.2">
+</head>
+<body>
+  <div class="page-ambient" aria-hidden="true"></div>
+
+  <div class="app-shell" id="appShell">
+    <header class="topbar">
+      <button class="brand" type="button" data-route="home" aria-label="返回概览">
+        <span class="brand-mark" aria-hidden="true">w</span>
+        <span class="brand-copy">
+          <strong>w记账</strong>
+          <small>LOCAL LEDGER</small>
+        </span>
+      </button>
+      <div class="topbar-actions">
+        <span class="local-badge" title="账目只存在这台设备">
+          <span class="local-badge-dot" aria-hidden="true"></span>
+          仅本机
+        </span>
+        <button class="icon-btn" type="button" data-route="settings" aria-label="打开设置">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+            <path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z"/>
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.95 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.95a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15.05 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9c0 .7.42 1.32 1.06 1.57H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="offline-note" id="offlineNote" hidden role="status">
+      <span aria-hidden="true">●</span> 当前离线，账本照常可记
+    </div>
+
+    <main class="main" id="main" tabindex="-1"></main>
+
+    <nav class="tabbar" aria-label="主导航">
+      <button class="tab" type="button" data-route="home" data-tab="home">
+        <span class="tab-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M3.5 10.5 12 3l8.5 7.5"/>
+            <path d="M5.5 9.5V21h13V9.5M9.5 21v-6h5v6"/>
+          </svg>
+        </span>
+        <span>概览</span>
+      </button>
+      <button class="tab" type="button" data-route="ledger" data-tab="ledger">
+        <span class="tab-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <rect x="4" y="3" width="16" height="18" rx="2.5"/>
+            <path d="M8 7.5h8M8 12h8M8 16.5h5"/>
+          </svg>
+        </span>
+        <span>账本</span>
+      </button>
+      <button class="tab tab-add" type="button" data-action="new" aria-label="记一单">
+        <span class="tab-add-circle" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+        </span>
+        <span class="tab-add-label">记一笔</span>
+      </button>
+      <button class="tab" type="button" data-route="stats" data-tab="stats">
+        <span class="tab-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>
+          </svg>
+        </span>
+        <span>统计</span>
+      </button>
+      <button class="tab" type="button" data-route="settings" data-tab="settings">
+        <span class="tab-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+            <circle cx="12" cy="8" r="3.2"/>
+            <path d="M5.5 20a6.5 6.5 0 0 1 13 0"/>
+          </svg>
+        </span>
+        <span>我的</span>
+      </button>
+    </nav>
+
+    <div class="assistant-dock" id="assistantDock">
+      <button class="assistant-fab" type="button" data-action="assistant-open" aria-label="打开奶娃智能助手" aria-haspopup="dialog">
+        <span class="assistant-fab-face" aria-hidden="true">
+          <img class="is-idle" src="./icons/naiba-avatar-idle.png" alt="">
+          <img class="is-glance" src="./icons/naiba-avatar-glance.png" alt="">
+        </span>
+        <span class="assistant-fab-copy">
+          <b>奶娃</b>
+          <small>问账助手</small>
+        </span>
+      </button>
+      <button class="assistant-dismiss" type="button" data-action="assistant-dismiss" aria-label="收起奶娃助手，可在我的中重新打开" title="收起奶娃">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+          <path d="m7 7 10 10M17 7 7 17"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="layer" id="sheetLayer" hidden>
+    <div class="layer-backdrop" data-action="close-sheet"></div>
+    <section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" tabindex="-1"></section>
+  </div>
+
+  <div class="layer assistant-layer" id="assistantLayer" hidden>
+    <div class="layer-backdrop" data-assistant-close></div>
+    <section class="sheet assistant-sheet" id="assistantSheet" role="dialog" aria-modal="true" aria-labelledby="assistantTitle" tabindex="-1"></section>
+  </div>
+
+  <div class="layer modal-layer" id="modalLayer" hidden>
+    <div class="layer-backdrop" data-modal-cancel></div>
+    <section class="modal" id="modal" role="alertdialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalMessage"></section>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true">
+    <span class="toast-icon" id="toastIcon" aria-hidden="true">✓</span>
+    <span id="toastText"></span>
+  </div>
+
+  <input type="file" id="importFile" accept=".json,application/json" hidden>
+
+  <noscript>
+    <div class="noscript">w记账需要开启 JavaScript 才能记账，请在浏览器设置中允许 JavaScript。</div>
+  </noscript>
+
+  <script src="./app.js?v=1.1.2" defer></script>
+</body>
+</html>
