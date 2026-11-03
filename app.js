@@ -7,17 +7,21 @@
 
   const STORAGE_KEY = "niuzhangben.ledger.v1"; // legacy key: keep existing local data
   const ASSISTANT_PREF_KEY = "wjizhang.assistant.hidden.v1";
-  const APP_VERSION = "1.1.2";
+  const APP_VERSION = "1.1.3";
   const MAX_AMOUNT = 99999999;
   const MAX_QTY = 999;
   const ROUTES = ["home", "ledger", "stats", "settings"];
-  const CATEGORY_NAMES = ["票务", "球鞋", "数码", "潮玩", "其他"];
+  const CATEGORY_NAMES = ["球鞋", "数码", "美妆", "得物搬砖", "其他"];
+  const DEFAULT_CATEGORY = "其他";
   const CATEGORY_META = Object.freeze({
-    票务: { char: "票", className: "cat-ticket", color: "#e9825b" },
     球鞋: { char: "鞋", className: "cat-sneaker", color: "#5b84e0" },
     数码: { char: "数", className: "cat-tech", color: "#9a7ae0" },
-    潮玩: { char: "玩", className: "cat-toy", color: "#df6da4" },
+    美妆: { char: "妆", className: "cat-beauty", color: "#d45d8c" },
+    得物搬砖: { char: "得", className: "cat-dewu", color: "#2e8b6d" },
     其他: { char: "其", className: "cat-other", color: "#8b8d80" },
+    // 旧分类不再出现在选择器里，但已有账目保留原标签，避免历史数据被改写。
+    票务: { char: "票", className: "cat-ticket", color: "#e9825b" },
+    潮玩: { char: "玩", className: "cat-toy", color: "#df6da4" },
   });
 
   const ICONS = {
@@ -202,6 +206,10 @@
 
   function getCategory(name) {
     return CATEGORY_META[name] || CATEGORY_META["其他"];
+  }
+
+  function entryPickerCategory(name) {
+    return CATEGORY_NAMES.includes(name) ? name : DEFAULT_CATEGORY;
   }
 
   function profitOf(record) {
@@ -1180,11 +1188,24 @@
     }).join("");
   }
 
+  function revealActiveCategoryChip() {
+    const row = $(".category-row", sheet);
+    const active = row ? $(".category-chip.is-active", row) : null;
+    if (!row || !active) return;
+    const rowRect = row.getBoundingClientRect();
+    const chipRect = active.getBoundingClientRect();
+    const target =
+      row.scrollLeft +
+      (chipRect.left - rowRect.left) -
+      (row.clientWidth - chipRect.width) / 2;
+    row.scrollLeft = Math.max(0, target);
+  }
+
   function entrySheetTemplate(mode, record, status) {
     const isNew = mode === "new";
     const isSell = mode === "sell";
     const isStock = status === "stock";
-    const category = record ? record.category : "票务";
+    const category = record ? entryPickerCategory(record.category) : DEFAULT_CATEGORY;
     const qty = record ? record.qty : 1;
     const cost = record ? inputValue(record.cost) : "";
     const revenue =
@@ -1253,7 +1274,7 @@
 
           <div class="form-section">
             <label class="field-label" for="entryName">卖出什么 <span>必填</span></label>
-            <input class="field-input name-input" id="entryName" name="name" type="text" maxlength="60" autocomplete="off" placeholder="例如：演唱会内场票 2 连座" value="${esc(record ? record.name : "")}" aria-describedby="entryNameError">
+            <input class="field-input name-input" id="entryName" name="name" type="text" maxlength="60" autocomplete="off" placeholder="例如：雅诗兰黛小棕瓶 50ml" value="${esc(record ? record.name : "")}" aria-describedby="entryNameError">
             <div class="field-error" id="entryNameError">先填一下卖了什么</div>
             <div class="category-row" role="group" aria-label="选择分类">
               ${entryCategoryChips(category)}
@@ -1350,9 +1371,7 @@
       (prefill
         ? {
             name: String(prefill.name || "").slice(0, 60),
-            category: CATEGORY_META[prefill.category]
-              ? prefill.category
-              : "票务",
+            category: entryPickerCategory(prefill.category),
             status,
             qty: clampQty(prefill.qty || 1),
             cost: prefill.cost != null ? prefill.cost : "",
@@ -1367,7 +1386,7 @@
       mode,
       id: record ? record.id : null,
       status,
-      category: seed ? seed.category : "票务",
+      category: seed ? entryPickerCategory(seed.category) : DEFAULT_CATEGORY,
       qty: seed ? seed.qty : 1,
       submitting: false,
     };
@@ -1377,6 +1396,7 @@
     sheetLayer.hidden = false;
     updateInteractionLock();
     bindEntryForm();
+    window.requestAnimationFrame(revealActiveCategoryChip);
     window.requestAnimationFrame(() => sheetLayer.classList.add("is-open"));
     sheet.focus({ preventScroll: true });
     if (window.matchMedia("(pointer: fine)").matches) {
@@ -1410,12 +1430,13 @@
     $$(".category-chip", form).forEach((button) => {
       button.addEventListener("click", () => {
         if (!sheetState) return;
-        sheetState.category = button.dataset.cat || "票务";
+        sheetState.category = button.dataset.cat || DEFAULT_CATEGORY;
         $$(".category-chip", form).forEach((chip) => {
           const active = chip === button;
           chip.classList.toggle("is-active", active);
           chip.setAttribute("aria-pressed", String(active));
         });
+        revealActiveCategoryChip();
       });
     });
 
@@ -1656,9 +1677,7 @@
     const now = new Date().toISOString();
     const values = {
       name,
-      category: CATEGORY_META[sheetState.category]
-        ? sheetState.category
-        : "其他",
+      category: entryPickerCategory(sheetState.category),
       status: isStock ? "stock" : "sold",
       qty: sheetState.qty,
       cost,
@@ -2174,15 +2193,15 @@
   }
 
   function inferEntryCategory(text) {
-    if (/演唱会|音乐节|门票|票务|看台|内场|连座|入场|演出|巡演|站|live/i.test(text)) {
-      return "票务";
+    if (/得物|搬砖/i.test(text)) return "得物搬砖";
+    if (/美妆|化妆品|护肤|彩妆|口红|唇釉|香水|粉底|气垫|眼影|腮红|面膜|精华|乳液|面霜|防晒|卸妆|睫毛膏|眼线|遮瑕|高光|雅诗兰黛|兰蔻|海蓝之谜|sk-?ii|资生堂|欧莱雅|倩碧|科颜氏|娇兰/i.test(text)) {
+      return "美妆";
     }
-    if (/球鞋|鞋|aj|dunk|yeezy|码/i.test(text)) return "球鞋";
+    if (/球鞋|跑鞋|板鞋|运动鞋|鞋|aj|dunk|yeezy|码/i.test(text)) return "球鞋";
     if (/iphone|苹果|手机|相机|电脑|switch|ps5|显卡|耳机|数码/i.test(text)) {
       return "数码";
     }
-    if (/labubu|拉布布|盲盒|molly|手办|潮玩|娃娃/i.test(text)) return "潮玩";
-    return "其他";
+    return DEFAULT_CATEGORY;
   }
 
   function parseAssistantEntry(text) {

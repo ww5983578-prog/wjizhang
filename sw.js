@@ -1,14 +1,14 @@
 /* w记账 · offline shell */
-const CACHE_NAME = "wjizhang-shell-v1.1.2";
+const CACHE_NAME = "wjizhang-shell-v1.1.3";
 const SHELL = [
   "./",
   "./index.html",
   "./styles.css",
-  "./styles.css?v=1.1.2",
+  "./styles.css?v=1.1.3",
   "./app.js",
-  "./app.js?v=1.1.2",
+  "./app.js?v=1.1.3",
   "./manifest.webmanifest",
-  "./manifest.webmanifest?v=1.1.2",
+  "./manifest.webmanifest?v=1.1.3",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./icons/icon-maskable-512.png",
@@ -54,7 +54,7 @@ self.addEventListener("fetch", (event) => {
 
   if (request.mode === "navigate") {
     event.respondWith(
-      fetch(request)
+      fetch(request, { cache: "no-store" })
         .then((response) => {
           if (response && response.ok) {
             const copy = response.clone();
