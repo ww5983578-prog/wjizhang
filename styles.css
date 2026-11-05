@@ -3435,6 +3435,241 @@ body.no-scroll .assistant-dock {
   line-height: 1.5;
 }
 
+.photo-block {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
+.photo-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.photo-block-head b {
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.photo-block-head span {
+  color: var(--muted-2);
+  font-size: 8.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.photo-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.photo-grid:empty {
+  display: none;
+}
+
+.photo-thumb {
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface-2);
+}
+
+.photo-thumb-open {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.photo-thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.photo-thumb img.is-loaded {
+  opacity: 1;
+}
+
+.photo-remove {
+  position: absolute;
+  z-index: 2;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 50%;
+  background: rgba(20, 25, 19, 0.76);
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(20, 25, 19, 0.18);
+}
+
+.photo-remove svg {
+  width: 10px;
+  height: 10px;
+}
+
+.photo-add {
+  display: flex;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 13px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 650;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.photo-add:hover {
+  border-color: var(--ink-soft);
+  background: var(--surface-2);
+}
+
+.photo-add:disabled {
+  opacity: 0.55;
+}
+
+.photo-add svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.photo-add small {
+  color: var(--muted-2);
+  font-size: 8.5px;
+  font-weight: 500;
+}
+
+.photo-hint {
+  margin-top: 6px;
+  color: var(--muted-2);
+  font-size: 8.5px;
+  line-height: 1.45;
+}
+
+.record-photo-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.record-photo-badge svg {
+  width: 10px;
+  height: 10px;
+}
+
+.stock-photo-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 7px;
+  color: var(--muted-2);
+  font-size: 8.5px;
+  font-weight: 500;
+}
+
+.stock-photo-badge svg {
+  width: 10px;
+  height: 10px;
+}
+
+/* --------------------------- photo viewer -------------------------- */
+
+.photo-viewer-layer {
+  z-index: 110;
+  align-items: center;
+  padding: 56px 16px 24px;
+}
+
+.photo-viewer-layer .layer-backdrop {
+  background: rgba(8, 10, 8, 0.9);
+  -webkit-backdrop-filter: blur(7px);
+  backdrop-filter: blur(7px);
+}
+
+.photo-viewer {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  max-width: min(100%, 900px);
+  max-height: 100%;
+  align-items: center;
+  justify-content: center;
+  transform: scale(0.97);
+  transition: transform 0.24s cubic-bezier(0.2, 0.82, 0.22, 1);
+}
+
+.layer.is-open .photo-viewer {
+  transform: scale(1);
+}
+
+.photo-viewer:focus {
+  outline: none;
+}
+
+.photo-viewer img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100dvh - 120px);
+  border-radius: 16px;
+  background: #141913;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.38);
+  object-fit: contain;
+}
+
+.photo-viewer-close {
+  position: absolute;
+  z-index: 2;
+  top: calc(14px + env(safe-area-inset-top));
+  right: 14px;
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+}
+
+.photo-viewer-close svg {
+  width: 16px;
+  height: 16px;
+}
+
 .field-error {
   display: none;
   margin-top: 4px;

@@ -7,9 +7,15 @@
 
   const STORAGE_KEY = "niuzhangben.ledger.v1"; // legacy key: keep existing local data
   const ASSISTANT_PREF_KEY = "wjizhang.assistant.hidden.v1";
-  const APP_VERSION = "1.1.3";
+  const APP_VERSION = "1.2.0";
   const MAX_AMOUNT = 99999999;
   const MAX_QTY = 999;
+  const MAX_PHOTOS = 6;
+  const MAX_PHOTO_INPUT_BYTES = 20 * 1024 * 1024;
+  const MAX_PHOTO_DIMENSION = 1600;
+  const MAX_BACKUP_BYTES = 120 * 1024 * 1024;
+  const PHOTO_DB_NAME = "wjizhang-photos-v1";
+  const PHOTO_STORE = "photos";
   const ROUTES = ["home", "ledger", "stats", "settings"];
   const CATEGORY_NAMES = ["球鞋", "数码", "美妆", "得物搬砖", "其他"];
   const DEFAULT_CATEGORY = "其他";
@@ -39,6 +45,7 @@
     upload: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3M8 7l4-4 4 4M4.5 18v2.5h15V18"/></svg>`,
     file: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></svg>`,
     table: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.2" y="4" width="17.6" height="16" rx="2.2"/><path d="M3.2 9.5h17.6M9.5 4v16"/></svg>`,
+    image: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.2"/><circle cx="8.5" cy="10" r="1.6"/><path d="m4.5 17 4.8-4.5 3.3 3 2.8-2.5 3.9 4"/></svg>`,
     shield: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4.6 6v5.2c0 4.5 3.1 7.9 7.4 9.8 4.3-1.9 7.4-5.3 7.4-9.8V6L12 3Z"/><path d="m9 12 2 2 4-4"/></svg>`,
     info: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.7h.01"/></svg>`,
     install: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11M8 10l4 4 4-4"/><path d="M5 16v4h14v-4"/></svg>`,
@@ -63,6 +70,9 @@
   const toastIcon = document.getElementById("toastIcon");
   const importFile = document.getElementById("importFile");
   const offlineNote = document.getElementById("offlineNote");
+  const photoViewerLayer = document.getElementById("photoViewerLayer");
+  const photoViewer = document.getElementById("photoViewer");
+  const photoViewerImage = document.getElementById("photoViewerImage");
 
   let records = [];
   let deferredInstallPrompt = null;
@@ -73,6 +83,10 @@
   let lastSheetFocus = null;
   let bootStorageError = false;
   let assistantDismissed = false;
+  let photoDbPromise = null;
+  let photoViewerUrl = null;
+  let photoViewerLastFocus = null;
+  let photoViewerCloseTimer = null;
   const assistant = {
     messages: [],
     typing: false,
@@ -282,6 +296,270 @@
     );
   }
 
+  /* --------------------------- photo storage ------------------------ */
+
+  function normalizePhotoMeta(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const id = String(raw.id || "").slice(0, 100);
+    if (!id) return null;
+    const type = String(raw.type || "image/jpeg").slice(0, 50);
+    const size = Number(raw.size);
+    const width = Number(raw.width);
+    const height = Number(raw.height);
+    return {
+      id,
+      name: String(raw.name || "备注图片").slice(0, 80),
+      type: type.startsWith("image/") ? type : "image/jpeg",
+      size: Number.isFinite(size) && size > 0 ? Math.round(size) : 0,
+      width: Number.isFinite(width) && width > 0 ? Math.round(width) : 0,
+      height: Number.isFinite(height) && height > 0 ? Math.round(height) : 0,
+      createdAt: typeof raw.createdAt === "string" ? raw.createdAt : "",
+    };
+  }
+
+  function openPhotoDB() {
+    if (photoDbPromise) return photoDbPromise;
+    photoDbPromise = new Promise((resolve, reject) => {
+      if (!("indexedDB" in window)) {
+        reject(new Error("IndexedDB is not supported"));
+        return;
+      }
+      const request = window.indexedDB.open(PHOTO_DB_NAME, 1);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains(PHOTO_STORE)) {
+          db.createObjectStore(PHOTO_STORE, { keyPath: "id" });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => {
+        photoDbPromise = null;
+        reject(request.error || new Error("Could not open photo storage"));
+      };
+      request.onblocked = () => {
+        photoDbPromise = null;
+        reject(new Error("Photo storage is blocked by another tab"));
+      };
+    });
+    return photoDbPromise;
+  }
+
+  async function putPhoto(photo) {
+    const db = await openPhotoDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(PHOTO_STORE, "readwrite");
+      tx.objectStore(PHOTO_STORE).put(photo);
+      tx.oncomplete = () => resolve(photo);
+      tx.onerror = () => reject(tx.error || new Error("Could not save photo"));
+      tx.onabort = () => reject(tx.error || new Error("Photo save was cancelled"));
+    });
+  }
+
+  async function getPhoto(id) {
+    if (!id) return null;
+    const db = await openPhotoDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(PHOTO_STORE, "readonly");
+      const request = tx.objectStore(PHOTO_STORE).get(id);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error || new Error("Could not read photo"));
+    });
+  }
+
+  async function deletePhotoBlobs(ids) {
+    const unique = [...new Set((ids || []).filter(Boolean))];
+    if (!unique.length) return;
+    const db = await openPhotoDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(PHOTO_STORE, "readwrite");
+      const store = tx.objectStore(PHOTO_STORE);
+      unique.forEach((id) => store.delete(id));
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error || new Error("Could not delete photo"));
+      tx.onabort = () => reject(tx.error || new Error("Photo delete was cancelled"));
+    });
+  }
+
+  async function clearAllPhotos() {
+    const db = await openPhotoDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(PHOTO_STORE, "readwrite");
+      tx.objectStore(PHOTO_STORE).clear();
+      tx.oncomplete = resolve;
+      tx.onerror = () => reject(tx.error || new Error("Could not clear photos"));
+      tx.onabort = () => reject(tx.error || new Error("Photo clear was cancelled"));
+    });
+  }
+
+  async function listPhotoIds() {
+    const db = await openPhotoDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(PHOTO_STORE, "readonly");
+      const request = tx.objectStore(PHOTO_STORE).getAllKeys();
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error || new Error("Could not list photos"));
+    });
+  }
+
+  async function cleanupOrphanPhotos() {
+    try {
+      const referenced = new Set(
+        records.flatMap((record) =>
+          (Array.isArray(record.photos) ? record.photos : []).map((photo) => photo.id),
+        ),
+      );
+      const stored = await listPhotoIds();
+      const orphaned = stored.filter((id) => !referenced.has(id));
+      if (orphaned.length) await deletePhotoBlobs(orphaned);
+    } catch (error) {
+      console.warn("Photo cleanup skipped", error);
+    }
+  }
+
+  function hydratePhotoImages(root = document) {
+    $$("img[data-photo-src]", root).forEach(async (image) => {
+      const id = image.dataset.photoSrc;
+      if (!id || image.dataset.photoLoaded === "1") return;
+      image.dataset.photoLoaded = "1";
+      try {
+        const photo = await getPhoto(id);
+        if (!photo || !photo.blob) {
+          image.classList.add("is-missing");
+          return;
+        }
+        const url = URL.createObjectURL(photo.blob);
+        if (!image.isConnected) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        const release = () => URL.revokeObjectURL(url);
+        image.addEventListener("load", () => {
+          image.classList.add("is-loaded");
+          release();
+        }, { once: true });
+        image.addEventListener("error", release, { once: true });
+        image.src = url;
+      } catch (error) {
+        console.warn("Could not load photo", error);
+        image.classList.add("is-missing");
+      }
+    });
+  }
+
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error || new Error("Could not read photo"));
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  async function dataUrlToBlob(dataUrl) {
+    if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) {
+      throw new Error("Invalid image data");
+    }
+    const response = await fetch(dataUrl);
+    if (!response.ok) throw new Error("Could not decode image data");
+    return response.blob();
+  }
+
+  async function requestPersistentStorage() {
+    try {
+      if (!navigator.storage || !navigator.storage.persist) return;
+      const already = navigator.storage.persisted
+        ? await navigator.storage.persisted()
+        : false;
+      if (!already) await navigator.storage.persist();
+    } catch (error) {
+      /* Storage persistence is best-effort. */
+    }
+  }
+
+  async function preparePhotoBlob(file) {
+    let source = null;
+    let width = 0;
+    let height = 0;
+    let release = () => {};
+    if (window.createImageBitmap) {
+      try {
+        const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+        source = bitmap;
+        width = bitmap.width;
+        height = bitmap.height;
+        release = () => {
+          if (bitmap.close) bitmap.close();
+        };
+      } catch (error) {
+        source = null;
+      }
+    }
+    if (!source) {
+      const url = URL.createObjectURL(file);
+      try {
+        source = await new Promise((resolve, reject) => {
+          const image = new Image();
+          image.onload = () => resolve(image);
+          image.onerror = () => reject(new Error("Image could not be decoded"));
+          image.src = url;
+        });
+        width = source.naturalWidth;
+        height = source.naturalHeight;
+        release = () => URL.revokeObjectURL(url);
+      } catch (error) {
+        URL.revokeObjectURL(url);
+        throw error;
+      }
+    }
+    if (!width || !height) {
+      release();
+      throw new Error("Image has no dimensions");
+    }
+    const scale = Math.min(1, MAX_PHOTO_DIMENSION / Math.max(width, height));
+    const outputWidth = Math.max(1, Math.round(width * scale));
+    const outputHeight = Math.max(1, Math.round(height * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = outputWidth;
+    canvas.height = outputHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      release();
+      throw new Error("Canvas is unavailable");
+    }
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, outputWidth, outputHeight);
+    if ("imageSmoothingQuality" in context) context.imageSmoothingQuality = "high";
+    context.drawImage(source, 0, 0, outputWidth, outputHeight);
+    release();
+    const blob = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", 0.82),
+    );
+    if (!blob) throw new Error("Image compression failed");
+    return { blob, width: outputWidth, height: outputHeight };
+  }
+
+  async function addPhotoFile(file) {
+    if (!file || !String(file.type || "").startsWith("image/")) {
+      throw new Error("请选择图片文件");
+    }
+    if (file.size > MAX_PHOTO_INPUT_BYTES) {
+      throw new Error("图片太大了，请选 20MB 以内的图片");
+    }
+    const prepared = await preparePhotoBlob(file);
+    const id = uid();
+    const meta = {
+      id,
+      name: String(file.name || "备注图片").slice(0, 80),
+      type: "image/jpeg",
+      size: prepared.blob.size,
+      width: prepared.width,
+      height: prepared.height,
+      createdAt: new Date().toISOString(),
+    };
+    await putPhoto({ ...meta, blob: prepared.blob });
+    return meta;
+  }
+
   /* -------------------------- persistence -------------------------- */
 
   function normalizeRecord(raw) {
@@ -304,6 +582,12 @@
     const cost = parseAmount(raw.cost) ?? 0;
     const fees = parseAmount(raw.fees) ?? 0;
     const revenue = status === "sold" ? parseAmount(raw.revenue) ?? 0 : 0;
+    const photos = Array.isArray(raw.photos)
+      ? raw.photos
+          .map(normalizePhotoMeta)
+          .filter(Boolean)
+          .slice(0, MAX_PHOTOS)
+      : [];
 
     return {
       id: typeof raw.id === "string" && raw.id ? raw.id.slice(0, 100) : uid(),
@@ -316,6 +600,7 @@
       fees,
       date,
       note: String(raw.note || "").slice(0, 200),
+      photos,
       createdAt,
       updatedAt,
     };
@@ -343,7 +628,7 @@
       window.localStorage.setItem(
         STORAGE_KEY,
         JSON.stringify({
-          schema: 1,
+          schema: 2,
           app: "w记账",
           updatedAt: new Date().toISOString(),
           records,
@@ -580,10 +865,14 @@
     const category = getCategory(record.category);
     const sold = record.status === "sold";
     const profit = profitOf(record);
+    const photoCount = Array.isArray(record.photos) ? record.photos.length : 0;
     const qtyNote =
       sold && record.qty > 1
         ? `<span class="meta-dot"></span><span>${record.qty} 件</span>`
         : "";
+    const photoNote = photoCount
+      ? `<span class="meta-dot"></span><span class="record-photo-badge">${ICONS.image}${photoCount}</span>`
+      : "";
     return `<button class="record-row" type="button" data-action="edit" data-id="${esc(record.id)}" aria-label="编辑 ${esc(record.name)}">
       <span class="record-glyph ${category.className}" aria-hidden="true">${category.char}</span>
       <span class="record-main">
@@ -593,6 +882,7 @@
           <span class="meta-dot"></span>
           <span>成本 ${formatMoney(record.cost)}</span>
           ${qtyNote}
+          ${photoNote}
           ${sold ? "" : `<span class="meta-dot"></span><span class="stock-pill">在售</span>`}
         </span>
       </span>
@@ -610,6 +900,7 @@
 
   function stockCard(record) {
     const category = getCategory(record.category);
+    const photoCount = Array.isArray(record.photos) ? record.photos.length : 0;
     return `<article class="stock-card">
       <button class="stock-card-main" type="button" data-action="edit" data-id="${esc(record.id)}" aria-label="查看 ${esc(record.name)}">
         <div class="stock-card-top">
@@ -617,7 +908,7 @@
           <span class="stock-days">${stockDaysText(record.date)}</span>
         </div>
         <h3 class="stock-name">${esc(record.name)}</h3>
-        <p class="stock-cost">${record.qty} 件 · 成本 <b>${formatMoney(record.cost)}</b></p>
+        <p class="stock-cost">${record.qty} 件 · 成本 <b>${formatMoney(record.cost)}</b>${photoCount ? `<span class="stock-photo-badge">${ICONS.image}${photoCount}</span>` : ""}</p>
       </button>
       <div class="stock-card-bottom">
         <span class="stock-status">在售中</span>
@@ -1045,7 +1336,7 @@
     <div class="settings-group">
       <button class="settings-item" type="button" data-action="export-json">
         <span class="settings-icon">${ICONS.file}</span>
-        <span class="settings-copy"><b>导出 JSON 备份</b><span>完整账目 · 换手机或换浏览器时用</span></span>
+        <span class="settings-copy"><b>导出 JSON 备份</b><span>含备注图片 · 换手机或换浏览器时用</span></span>
         <span class="settings-arrow">${ICONS.arrowRight}</span>
       </button>
       <button class="settings-item" type="button" data-action="export-csv">
@@ -1074,7 +1365,7 @@
       </button>
     </div>
 
-    <div class="data-note">${ICONS.shield}<span>账目只保存在当前浏览器，不经过服务器。换手机、清理浏览器数据前，记得先导出 JSON 备份。当前占用 ${formatBytes(storageBytes)}。</span></div>
+    <div class="data-note">${ICONS.shield}<span>账目和备注图片只保存在当前浏览器，不经过服务器。换手机、清理浏览器数据前，记得先导出 JSON 备份；备份会包含图片。当前账目文本占用 ${formatBytes(storageBytes)}。</span></div>
     <p class="about-line">w记账 v${APP_VERSION} · 本机账本 · 离线可用</p>`;
   }
 
@@ -1097,6 +1388,7 @@
     }
     updateTabbar();
     bindPage();
+    hydratePhotoImages(main);
     document.title =
       state.route === "home"
         ? "w记账 · 顺手记，明白赚"
@@ -1186,6 +1478,104 @@
         <span class="cat-mini ${meta.className}">${meta.char}</span>${name}
       </button>`;
     }).join("");
+  }
+
+  function photoThumbMarkup(photo, index) {
+    return `<div class="photo-thumb">
+      <button class="photo-thumb-open" type="button" data-action="view-photo" data-photo-id="${esc(photo.id)}" aria-label="查看第 ${index + 1} 张备注图片">
+        <img data-photo-src="${esc(photo.id)}" alt="备注图片 ${index + 1}">
+      </button>
+      <button class="photo-remove" type="button" data-action="remove-photo" data-photo-id="${esc(photo.id)}" aria-label="移除第 ${index + 1} 张图片">${ICONS.close}</button>
+    </div>`;
+  }
+
+  function entryPhotoGridMarkup() {
+    const photos = sheetState && Array.isArray(sheetState.photos) ? sheetState.photos : [];
+    return photos.map((photo, index) => photoThumbMarkup(photo, index)).join("");
+  }
+
+  function updateEntryPhotoControls() {
+    const grid = $("#entryPhotoGrid");
+    const add = $("#entryPhotoAdd");
+    const count = $("#entryPhotoCount");
+    if (!sheetState) return;
+    if (grid) {
+      grid.innerHTML = entryPhotoGridMarkup();
+      hydratePhotoImages(grid);
+    }
+    const total = sheetState.photos.length;
+    if (count) count.textContent = `${total}/${MAX_PHOTOS} · 本机保存`;
+    if (add) {
+      const full = total >= MAX_PHOTOS;
+      add.disabled = full || sheetState.photoBusy === true;
+      add.innerHTML = sheetState.photoBusy
+        ? `${ICONS.refresh}<span>正在处理图片…</span>`
+        : `${ICONS.image}<span>添加图片</span><small>${full ? "已达上限" : "收据 / 聊天记录 / 实物图"}</small>`;
+    }
+  }
+
+  function removeSheetPhoto(photoId) {
+    if (!sheetState || sheetState.photoBusy) return;
+    const index = sheetState.photos.findIndex((photo) => photo.id === photoId);
+    if (index < 0) return;
+    sheetState.photos.splice(index, 1);
+    if (sheetState.newPhotoIds.has(photoId)) {
+      sheetState.newPhotoIds.delete(photoId);
+      deletePhotoBlobs([photoId]).catch((error) => {
+        console.warn("Could not delete unsaved photo", error);
+      });
+    } else {
+      sheetState.removedPhotoIds.add(photoId);
+    }
+    updateEntryPhotoControls();
+  }
+
+  async function handlePhotoFiles(files) {
+    if (!sheetState || sheetState.photoBusy) return;
+    const list = Array.from(files || []);
+    if (!list.length) return;
+    const remaining = MAX_PHOTOS - sheetState.photos.length;
+    if (remaining <= 0) {
+      showToast(`一笔账最多加 ${MAX_PHOTOS} 张图片`, "error");
+      return;
+    }
+    const session = sheetState;
+    session.photoBusy = true;
+    updateEntryPhotoControls();
+    requestPersistentStorage();
+    let added = 0;
+    let failed = 0;
+    const available = list.slice(0, remaining);
+    for (const file of available) {
+      if (session.closing) break;
+      try {
+        const meta = await addPhotoFile(file);
+        if (sheetState !== session || session.closing) {
+          await deletePhotoBlobs([meta.id]);
+          break;
+        }
+        session.photos.push(meta);
+        session.newPhotoIds.add(meta.id);
+        added += 1;
+      } catch (error) {
+        failed += 1;
+        console.warn("Photo was not added", error);
+      }
+    }
+    if (sheetState === session && !session.closing) {
+      session.photoBusy = false;
+      updateEntryPhotoControls();
+    }
+    if (added && failed) {
+      showToast(`已添加 ${added} 张，${failed} 张没加上`);
+    } else if (added) {
+      showToast(`已添加 ${added} 张图片`);
+    } else if (failed) {
+      showToast("图片处理失败，换 JPG / PNG 再试试", "error");
+    }
+    if (list.length > remaining) {
+      showToast(`最多 ${MAX_PHOTOS} 张，多的没有添加`);
+    }
   }
 
   function revealActiveCategoryChip() {
@@ -1332,6 +1722,18 @@
           <div class="form-section">
             <label class="field-label" for="entryNote">备注 <span>可选</span></label>
             <textarea class="field-input field-textarea" id="entryNote" name="note" maxlength="200" placeholder="买家、渠道、取货方式…">${esc(note)}</textarea>
+            <div class="photo-block">
+              <div class="photo-block-head">
+                <b>备注图片</b>
+                <span id="entryPhotoCount">0/${MAX_PHOTOS} · 本机保存</span>
+              </div>
+              <div class="photo-grid" id="entryPhotoGrid">${entryPhotoGridMarkup()}</div>
+              <button class="photo-add" id="entryPhotoAdd" type="button">
+                ${ICONS.image}<span>添加图片</span><small>收据 / 聊天记录 / 实物图</small>
+              </button>
+              <input id="entryPhotoInput" type="file" accept="image/*" multiple hidden>
+              <p class="photo-hint">图片压缩后存在本机，导出 JSON 备份时会一起打包。</p>
+            </div>
           </div>
 
           <div class="entry-hint" id="entryHint">${ICONS.info}<span>${isStock ? "先记成本，卖出时在首页点「卖出」补收入，再自动结算利润。" : "利润 = 卖出收入 − 拿货成本 − 其他费用。"}</span></div>
@@ -1388,6 +1790,13 @@
       status,
       category: seed ? entryPickerCategory(seed.category) : DEFAULT_CATEGORY,
       qty: seed ? seed.qty : 1,
+      photos: seed && Array.isArray(seed.photos)
+        ? seed.photos.map(normalizePhotoMeta).filter(Boolean).slice(0, MAX_PHOTOS)
+        : [],
+      newPhotoIds: new Set(),
+      removedPhotoIds: new Set(),
+      photoBusy: false,
+      closing: false,
       submitting: false,
     };
     lastSheetFocus = document.activeElement;
@@ -1396,6 +1805,8 @@
     sheetLayer.hidden = false;
     updateInteractionLock();
     bindEntryForm();
+    hydratePhotoImages(sheet);
+    updateEntryPhotoControls();
     window.requestAnimationFrame(revealActiveCategoryChip);
     window.requestAnimationFrame(() => sheetLayer.classList.add("is-open"));
     sheet.focus({ preventScroll: true });
@@ -1451,6 +1862,16 @@
       button.addEventListener("click", () => {
         setEntryStatus(button.dataset.sheetStatus);
       });
+    });
+
+    $("#entryPhotoAdd")?.addEventListener("click", () => {
+      $("#entryPhotoInput")?.click();
+    });
+    $("#entryPhotoInput")?.addEventListener("change", async (event) => {
+      const input = event.currentTarget;
+      const files = Array.from(input.files || []);
+      input.value = "";
+      await handlePhotoFiles(files);
     });
   }
 
@@ -1584,6 +2005,10 @@
 
   function submitEntry() {
     if (!sheetState || sheetState.submitting) return;
+    if (sheetState.photoBusy) {
+      showToast("图片还在处理，稍等一下再保存");
+      return;
+    }
     const costInput = $("#entryCost");
     const revenueInput = $("#entryRevenue");
     const feesInput = $("#entryFees");
@@ -1685,6 +2110,7 @@
       fees,
       date,
       note: noteInput.value.trim().slice(0, 200),
+      photos: sheetState.photos.map((photo) => ({ ...photo })),
       updatedAt: now,
     };
     const previousRecords = records.slice();
@@ -1710,6 +2136,15 @@
       return;
     }
 
+    const removedPhotos = [...sheetState.removedPhotoIds];
+    sheetState.newPhotoIds.clear();
+    sheetState.removedPhotoIds.clear();
+    if (removedPhotos.length) {
+      deletePhotoBlobs(removedPhotos).catch((error) => {
+        console.warn("Could not clean up removed photos", error);
+      });
+    }
+
     sheetState.submitting = true;
     const saveButton = $("#sheetSave");
     if (saveButton) saveButton.disabled = true;
@@ -1732,6 +2167,16 @@
 
   function closeSheet() {
     if (sheetLayer.hidden || sheetCloseTimer) return;
+    if (sheetState) {
+      sheetState.closing = true;
+      if (sheetState.newPhotoIds.size) {
+        const unsaved = [...sheetState.newPhotoIds];
+        sheetState.newPhotoIds.clear();
+        deletePhotoBlobs(unsaved).catch((error) => {
+          console.warn("Could not clean up unsaved photos", error);
+        });
+      }
+    }
     sheetLayer.classList.remove("is-open");
     sheetCloseTimer = window.setTimeout(() => {
       sheetLayer.hidden = true;
@@ -1746,6 +2191,56 @@
         }
       }
     }, 300);
+  }
+
+  /* --------------------------- photo viewer ------------------------- */
+
+  async function openPhotoViewer(photoId) {
+    if (!photoId) return;
+    try {
+      const photo = await getPhoto(photoId);
+      if (!photo || !photo.blob) {
+        showToast("这张图片找不到了", "error");
+        return;
+      }
+      photoViewerLastFocus = document.activeElement;
+      if (photoViewerUrl) URL.revokeObjectURL(photoViewerUrl);
+      photoViewerUrl = URL.createObjectURL(photo.blob);
+      photoViewerImage.src = photoViewerUrl;
+      photoViewerImage.alt = photo.name || "备注图片";
+      photoViewerLayer.hidden = false;
+      updateInteractionLock();
+      window.requestAnimationFrame(() => photoViewerLayer.classList.add("is-open"));
+      window.setTimeout(() => {
+        $("#photoViewerClose")?.focus({ preventScroll: true });
+      }, 80);
+    } catch (error) {
+      console.warn("Could not open photo", error);
+      showToast("图片打不开，请再试一次", "error");
+    }
+  }
+
+  function closePhotoViewer() {
+    if (photoViewerLayer.hidden || photoViewerCloseTimer) return;
+    photoViewerLayer.classList.remove("is-open");
+    photoViewerCloseTimer = window.setTimeout(() => {
+      photoViewerLayer.hidden = true;
+      photoViewerCloseTimer = null;
+      photoViewerImage.removeAttribute("src");
+      if (photoViewerUrl) {
+        URL.revokeObjectURL(photoViewerUrl);
+        photoViewerUrl = null;
+      }
+      updateInteractionLock();
+      if (photoViewerLastFocus && photoViewerLastFocus.isConnected) {
+        try {
+          photoViewerLastFocus.focus({ preventScroll: true });
+        } catch (error) {
+          /* noop */
+        }
+      }
+      photoViewerLastFocus = null;
+    }, 220);
   }
 
   /* ---------------------------- 奶娃助手 --------------------------- */
@@ -2537,11 +3032,12 @@
     const sheetOpen = !sheetLayer.hidden;
     const assistantOpen = !assistantLayer.hidden;
     const modalOpen = !modalLayer.hidden;
-    const anyOverlay = sheetOpen || assistantOpen || modalOpen;
+    const photoOpen = !photoViewerLayer.hidden;
+    const anyOverlay = sheetOpen || assistantOpen || modalOpen || photoOpen;
     document.body.classList.toggle("no-scroll", anyOverlay);
     appShell.inert = anyOverlay;
-    sheetLayer.inert = modalOpen || assistantOpen;
-    assistantLayer.inert = modalOpen || sheetOpen;
+    sheetLayer.inert = modalOpen || assistantOpen || photoOpen;
+    assistantLayer.inert = modalOpen || sheetOpen || photoOpen;
   }
 
   function trapFocus(event, container) {
@@ -2621,8 +3117,17 @@
       case "delete-record":
         await requestDelete(element.dataset.id);
         break;
+      case "view-photo":
+        await openPhotoViewer(element.dataset.photoId);
+        break;
+      case "remove-photo":
+        removeSheetPhoto(element.dataset.photoId);
+        break;
+      case "close-photo":
+        closePhotoViewer();
+        break;
       case "export-json":
-        exportJson();
+        await exportJson();
         break;
       case "export-csv":
         exportCsv();
@@ -2656,9 +3161,10 @@
   async function requestDelete(id) {
     const record = getRecord(id);
     if (!record) return;
+    const photoIds = (record.photos || []).map((photo) => photo.id);
     const confirmed = await openModal({
       title: "删除这笔账？",
-      message: `“${record.name}”会从账本里移除，删除后无法恢复。`,
+      message: `“${record.name}”会从账本里移除${photoIds.length ? `，连同 ${photoIds.length} 张备注图片` : ""}，删除后无法恢复。`,
       confirmText: "删除",
       danger: true,
       icon: "trash",
@@ -2670,6 +3176,11 @@
       records = previous;
       return;
     }
+    if (photoIds.length) {
+      deletePhotoBlobs(photoIds).catch((error) => {
+        console.warn("Could not delete record photos", error);
+      });
+    }
     closeSheet();
     renderApp();
     window.setTimeout(() => showToast("这笔账已删除"), 250);
@@ -2680,9 +3191,13 @@
       showToast("账本已经是空的");
       return;
     }
+    const photoCount = records.reduce(
+      (total, record) => total + (Array.isArray(record.photos) ? record.photos.length : 0),
+      0,
+    );
     const confirmed = await openModal({
       title: "清空全部账目？",
-      message: `本机上的 ${records.length} 笔账目都会被删除，操作无法撤销。`,
+      message: `本机上的 ${records.length} 笔账目${photoCount ? `和 ${photoCount} 张备注图片` : ""}都会被删除，操作无法撤销。`,
       extraHtml: "建议先回到设置，导出一份 JSON 备份。",
       confirmText: "全部清空",
       danger: true,
@@ -2695,6 +3210,11 @@
       records = previous;
       return;
     }
+    try {
+      await clearAllPhotos();
+    } catch (error) {
+      console.warn("Could not clear photos", error);
+    }
     renderApp();
     showToast("账本已清空");
   }
@@ -2703,7 +3223,7 @@
     openModal({
       title: "w记账怎么用",
       message: "一分钟看懂，之后照着记就行。",
-      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡上点“卖出”，补上收入即可。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用。在售库存只算占用成本，不计利润。<br><br><b>数据在哪</b><br>全部存在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
+      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡上点“卖出”，补上收入即可。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用。在售库存只算占用成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
       confirmText: "知道了",
       single: true,
       icon: "info",
@@ -2766,24 +3286,55 @@
     window.setTimeout(() => URL.revokeObjectURL(url), 1200);
   }
 
-  function exportJson() {
+  async function exportJson() {
     if (!records.length) {
       showToast("还没有账目可以导出", "error");
       return;
     }
-    const payload = {
-      app: "w记账",
-      schema: 1,
-      version: APP_VERSION,
-      exportedAt: new Date().toISOString(),
-      records,
-    };
-    downloadBlob(
-      JSON.stringify(payload, null, 2),
-      `w记账备份-${todayISO()}.json`,
-      "application/json;charset=utf-8",
-    );
-    showToast("JSON 备份已导出");
+    try {
+      showToast("正在打包账目和图片…");
+      const exportedRecords = [];
+      let photoCount = 0;
+      let missingPhotos = 0;
+      for (const record of records) {
+        const photos = [];
+        for (const meta of Array.isArray(record.photos) ? record.photos : []) {
+          const photo = { ...meta };
+          try {
+            const stored = await getPhoto(meta.id);
+            if (stored && stored.blob) {
+              photo.dataUrl = await blobToDataUrl(stored.blob);
+              photoCount += 1;
+            } else {
+              missingPhotos += 1;
+            }
+          } catch (error) {
+            missingPhotos += 1;
+            console.warn("Could not export photo", error);
+          }
+          photos.push(photo);
+        }
+        exportedRecords.push({ ...record, photos });
+      }
+      const payload = {
+        app: "w记账",
+        schema: 2,
+        version: APP_VERSION,
+        exportedAt: new Date().toISOString(),
+        records: exportedRecords,
+      };
+      downloadBlob(
+        JSON.stringify(payload),
+        `w记账备份-${todayISO()}.json`,
+        "application/json;charset=utf-8",
+      );
+      showToast(
+        `JSON 备份已导出${photoCount ? ` · 含 ${photoCount} 张图片` : ""}${missingPhotos ? ` · ${missingPhotos} 张图片缺失` : ""}`,
+      );
+    } catch (error) {
+      console.warn("Export failed", error);
+      showToast("导出失败，请再试一次", "error");
+    }
   }
 
   function csvCell(value, numeric = false) {
@@ -2838,7 +3389,7 @@
 
   async function importBackup(file) {
     if (!file) return;
-    if (file.size > 2 * 1024 * 1024) {
+    if (file.size > MAX_BACKUP_BYTES) {
       showToast("备份文件太大了，可能不是w记账备份", "error");
       return;
     }
@@ -2860,27 +3411,96 @@
         seen.add(record.id);
         unique.push(record);
       });
+
+      const imageData = new Map();
+      rawList.forEach((rawRecord) => {
+        if (!rawRecord || !Array.isArray(rawRecord.photos)) return;
+        rawRecord.photos.forEach((photo) => {
+          if (!photo || typeof photo.id !== "string") return;
+          const dataUrl =
+            typeof photo.dataUrl === "string"
+              ? photo.dataUrl
+              : typeof photo.data === "string"
+                ? photo.data
+                : "";
+          if (dataUrl.startsWith("data:image/")) {
+            imageData.set(photo.id, dataUrl);
+          }
+        });
+      });
+
+      let imageCount = 0;
+      unique.forEach((record) => {
+        record.photos = (record.photos || []).filter((photo) => {
+          if (!imageData.has(photo.id)) return false;
+          imageCount += 1;
+          return true;
+        });
+      });
+
       const confirmed = await openModal({
         title: "导入这份备份？",
-        message: `将用 ${unique.length} 笔账目替换当前 ${records.length} 笔账目。导入后无法撤销。`,
+        message: `将用 ${unique.length} 笔账目${imageCount ? `和 ${imageCount} 张备注图片` : ""}替换当前 ${records.length} 笔账目。导入后无法撤销。`,
         confirmText: "导入并替换",
         danger: records.length > 0,
         icon: "upload",
       });
       if (!confirmed) return;
+
       const previous = records;
-      records = unique;
-      if (!saveRecords()) {
+      const oldPhotoIds = previous.flatMap((record) =>
+        (record.photos || []).map((photo) => photo.id),
+      );
+      const createdPhotoIds = [];
+      try {
+        for (const record of unique) {
+          const restoredPhotos = [];
+          for (const photo of record.photos) {
+            const dataUrl = imageData.get(photo.id);
+            if (!dataUrl) continue;
+            const blob = await dataUrlToBlob(dataUrl);
+            if (blob.size > 12 * 1024 * 1024) {
+              throw new Error("Imported image is too large");
+            }
+            const newId = uid();
+            const meta = {
+              ...photo,
+              id: newId,
+              type: blob.type && blob.type.startsWith("image/") ? blob.type : "image/jpeg",
+              size: blob.size,
+            };
+            await putPhoto({ ...meta, blob });
+            createdPhotoIds.push(newId);
+            restoredPhotos.push(meta);
+          }
+          record.photos = restoredPhotos;
+        }
+        records = unique;
+        if (!saveRecords()) {
+          records = previous;
+          await deletePhotoBlobs(createdPhotoIds);
+          return;
+        }
+      } catch (error) {
         records = previous;
-        return;
+        await deletePhotoBlobs(createdPhotoIds).catch(() => {});
+        throw error;
+      }
+
+      if (oldPhotoIds.length) {
+        deletePhotoBlobs(oldPhotoIds).catch((error) => {
+          console.warn("Could not remove replaced photos", error);
+        });
       }
       state.search = "";
       state.ledgerFilter = "all";
       renderApp();
-      showToast(`已导入 ${unique.length} 笔账目`);
+      showToast(
+        `已导入 ${unique.length} 笔账目${imageCount ? ` · ${imageCount} 张图片` : ""}`,
+      );
     } catch (error) {
       console.warn("Import failed", error);
-      showToast("这个文件不是有效的w记账备份", "error");
+      showToast("这个文件不是有效的w记账备份，或图片导入失败", "error");
     }
   }
 
@@ -2931,6 +3551,15 @@
     bindAssistantEvents();
 
     document.addEventListener("keydown", (event) => {
+      if (!photoViewerLayer.hidden) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closePhotoViewer();
+        } else if (event.key === "Tab") {
+          trapFocus(event, photoViewerLayer);
+        }
+        return;
+      }
       if (!modalLayer.hidden) {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -3009,6 +3638,9 @@
     bindGlobalEvents();
     updateOnlineState();
     renderApp({ animate: true });
+    if (records.some((record) => Array.isArray(record.photos) && record.photos.length)) {
+      requestPersistentStorage();
+    }
     registerServiceWorker();
 
     if (bootStorageError) {
