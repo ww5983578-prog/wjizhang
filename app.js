@@ -7,17 +7,13 @@
 
   const STORAGE_KEY = "niuzhangben.ledger.v1"; // legacy key: keep existing local data
   const ASSISTANT_PREF_KEY = "wjizhang.assistant.hidden.v1";
-  const APP_VERSION = "1.4.1";
+  const APP_VERSION = "1.4.2";
   const MAX_AMOUNT = 99999999;
   const MAX_QTY = 999;
   const MAX_PHOTOS = 6;
   const MAX_PHOTO_INPUT_BYTES = 20 * 1024 * 1024;
   const MAX_PHOTO_DIMENSION = 1600;
   const MAX_BACKUP_BYTES = 120 * 1024 * 1024;
-  const TESSERACT_VERSION = "7.0.0";
-  const TESSERACT_SCRIPT_URL = `https://cdn.jsdelivr.net/npm/tesseract.js@${TESSERACT_VERSION}/dist/tesseract.min.js`;
-  const TESSERACT_WORKER_URL = `https://cdn.jsdelivr.net/npm/tesseract.js@${TESSERACT_VERSION}/dist/worker.min.js`;
-  const TESSERACT_LANG_PATH = "https://tessdata.projectnaptha.com/4.0.0_fast";
   const PHOTO_DB_NAME = "wjizhang-photos-v1";
   const PHOTO_STORE = "photos";
   const ROUTES = ["home", "ledger", "stats", "settings"];
@@ -91,9 +87,6 @@
   let photoViewerUrl = null;
   let photoViewerLastFocus = null;
   let photoViewerCloseTimer = null;
-  let tesseractPromise = null;
-  let jdOcrWorkerPromise = null;
-  let jdOcrBusy = false;
   const assistant = {
     messages: [],
     typing: false,
@@ -1501,15 +1494,13 @@
     return photos.map((photo, index) => photoThumbMarkup(photo, index)).join("");
   }
 
-  function parseJdOrderText(text, options = {}) {
+  function parseJdOrderText(text) {
     const raw = String(text || "")
       .replace(/\r/g, "\n")
       .replace(/\u00a0/g, " ")
       .trim();
     if (!raw || raw.length > 20000) return null;
-    if (!options.allowWithoutJd && !/京东|订单号|订单编号|实付款?|商品名称/.test(raw)) {
-      return null;
-    }
+    if (!/京东|订单号|订单编号|实付款?|商品名称/.test(raw)) return null;
 
     const lines = raw
       .split(/\n+/)
@@ -1535,14 +1526,12 @@
 
     const specMatch = raw.match(/数\s*量\s*[×xX*]?\s*\d{1,3}\s*[,，、]?\s*([^\n]{1,60})/);
     const specName = specMatch ? cleanName(specMatch[1]) : "";
-    let nameFromSpec = Boolean(specName);
     let name = specName || pick([
       /(?:商品名称|商品名|商品|宝贝|拍品)\s*[:：]\s*([^\n]{2,100})/,
       /【京东】\s*([^\n]{2,100})/,
     ]);
     name = cleanName(name);
     if (!name || /订单|签收|物流|退款|客服|验证码|收货|地址|电话/.test(name)) {
-      nameFromSpec = false;
       name = cleanName(
         lines.find((line) => {
           if (/^[\d\s:：.\-+]+$/.test(line)) return false;
@@ -1575,7 +1564,6 @@
     if (!name && cost === null) return null;
     return {
       name,
-      nameFromSpec,
       cost,
       qty: Number.isFinite(qty) && qty > 0 ? qty : null,
       orderNo,
@@ -1668,258 +1656,6 @@
     const data = parseJdOrderText(text);
     if (data && applyJdOrderData(data)) return;
     showToast("没识别到商品和实付价，把京东订单详情完整粘贴进来", "error");
-  }
-
-  function setJdOcrStatus(message, visible = true) {
-    const status = $("#jdOcrStatus");
-    const label = $("#jdOcrStatusText");
-    if (status) status.hidden = !visible;
-    if (label && message) label.textContent = message;
-  }
-
-  function hideJdOcrStatus() {
-    setJdOcrStatus("", false);
-  }
-
-  function updateJdOcrProgress(message) {
-    if (!message) return;
-    const status = message.status || "";
-    let text = "";
-    if (status === "recognizing text") {
-      text = `正在识别图片 ${Math.round((Number(message.progress) || 0) * 100)}%`;
-    } else if (status === "loading language traineddata") {
-      text = "正在加载中文识别包…";
-    } else if (status === "loading tesseract core") {
-      text = "正在加载识别引擎…";
-    } else if (status === "initializing tesseract" || status === "initializing api") {
-      text = "正在初始化识别…";
-    }
-    if (text) setJdOcrStatus(text, true);
-  }
-
-  function loadTesseractEngine() {
-    if (window.Tesseract) return Promise.resolve(window.Tesseract);
-    if (tesseractPromise) return tesseractPromise;
-    tesseractPromise = new Promise((resolve, reject) => {
-      const script = document.createElement("script");
-      script.src = TESSERACT_SCRIPT_URL;
-      script.async = true;
-      script.dataset.jdOcr = "1";
-      script.onload = () => {
-        if (window.Tesseract) {
-          resolve(window.Tesseract);
-        } else {
-          tesseractPromise = null;
-          reject(new Error("OCR engine did not initialize"));
-        }
-      };
-      script.onerror = () => {
-        tesseractPromise = null;
-        script.remove();
-        reject(new Error("Could not load OCR engine"));
-      };
-      document.head.appendChild(script);
-    });
-    return tesseractPromise;
-  }
-
-  function getJdOcrWorker() {
-    if (jdOcrWorkerPromise) return jdOcrWorkerPromise;
-    jdOcrWorkerPromise = loadTesseractEngine()
-      .then((Tesseract) =>
-        Tesseract.createWorker("chi_sim", 1, {
-          workerPath: TESSERACT_WORKER_URL,
-          langPath: TESSERACT_LANG_PATH,
-          logger: updateJdOcrProgress,
-        }),
-      )
-      .catch((error) => {
-        jdOcrWorkerPromise = null;
-        throw error;
-      });
-    return jdOcrWorkerPromise;
-  }
-
-  async function makeJdProductCrop(file) {
-    let source = null;
-    let objectUrl = "";
-    if (window.createImageBitmap) {
-      try {
-        source = await createImageBitmap(file);
-      } catch (error) {
-        source = null;
-      }
-    }
-    if (!source) {
-      objectUrl = URL.createObjectURL(file);
-      try {
-        source = await new Promise((resolve, reject) => {
-          const image = new Image();
-          image.onload = () => resolve(image);
-          image.onerror = () => reject(new Error("Image could not be decoded"));
-          image.src = objectUrl;
-        });
-      } catch (error) {
-        URL.revokeObjectURL(objectUrl);
-        throw error;
-      }
-    }
-    const width = source.width || source.naturalWidth;
-    const height = source.height || source.naturalHeight;
-    if (!width || !height) {
-      if (source.close) source.close();
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-      throw new Error("Image has no dimensions");
-    }
-    const sourceY = Math.round(height * 0.16);
-    const sourceHeight = Math.max(1, Math.round(height * 0.29));
-    const base = document.createElement("canvas");
-    base.width = width;
-    base.height = sourceHeight;
-    const baseContext = base.getContext("2d");
-    if (!baseContext) throw new Error("Canvas is unavailable");
-    baseContext.drawImage(source, 0, sourceY, width, sourceHeight, 0, 0, width, sourceHeight);
-    if (source.close) source.close();
-    if (objectUrl) URL.revokeObjectURL(objectUrl);
-
-    const pixels = baseContext.getImageData(0, 0, width, sourceHeight);
-    const data = pixels.data;
-    for (let i = 0; i < data.length; i += 4) {
-      const r = data[i];
-      const g = data[i + 1];
-      const b = data[i + 2];
-      if (b > 140 && b > r + 40 && b > g + 25) {
-        data[i] = 255;
-        data[i + 1] = 255;
-        data[i + 2] = 255;
-      }
-    }
-    baseContext.putImageData(pixels, 0, 0);
-
-    const scale = 1.5;
-    const output = document.createElement("canvas");
-    output.width = Math.round(width * scale);
-    output.height = Math.round(sourceHeight * scale);
-    const context = output.getContext("2d");
-    if (!context) throw new Error("Canvas is unavailable");
-    context.drawImage(base, 0, 0, output.width, output.height);
-    const outputPixels = context.getImageData(0, 0, output.width, output.height);
-    const outputData = outputPixels.data;
-    for (let i = 0; i < outputData.length; i += 4) {
-      const gray = outputData[i] * 0.299 + outputData[i + 1] * 0.587 + outputData[i + 2] * 0.114;
-      const value = Math.max(0, Math.min(255, (gray - 128) * 1.1 + 128));
-      outputData[i] = value;
-      outputData[i + 1] = value;
-      outputData[i + 2] = value;
-    }
-    context.putImageData(outputPixels, 0, 0);
-    const blob = await new Promise((resolve) => output.toBlob(resolve, "image/png"));
-    if (!blob) throw new Error("Could not prepare OCR image");
-    return blob;
-  }
-
-  async function recognizeJdImage(file) {
-    if (!sheetState || jdOcrBusy) return;
-    if (!file || !String(file.type || "").startsWith("image/")) {
-      showToast("请选择一张京东订单截图", "error");
-      return;
-    }
-    if (file.size > 25 * 1024 * 1024) {
-      showToast("图片太大了，请选 25MB 以内的截图", "error");
-      return;
-    }
-    const session = sheetState;
-    const button = $("#entryJdImage");
-    const label = button ? button.lastElementChild : null;
-    const firstLoad = !window.Tesseract && !jdOcrWorkerPromise;
-    jdOcrBusy = true;
-    if (button) {
-      button.disabled = true;
-      button.setAttribute("aria-busy", "true");
-    }
-    if (label) label.textContent = "识别中";
-    setJdOcrStatus("正在准备识别…", true);
-    if (firstLoad) {
-      showToast("首次识图要联网加载中文识别包，截图不会上传");
-    }
-    try {
-      const worker = await getJdOcrWorker();
-      if (sheetState !== session) return;
-
-      setJdOcrStatus("正在识别订单金额…", true);
-      const fullResult = await worker.recognize(file);
-      if (sheetState !== session) return;
-      const fullText = fullResult && fullResult.data && fullResult.data.text
-        ? fullResult.data.text
-        : "";
-      const fullData = parseJdOrderText(fullText, { allowWithoutJd: true });
-
-      let bandText = "";
-      let bandData = null;
-      try {
-        setJdOcrStatus("正在识别商品规格…", true);
-        const bandBlob = await makeJdProductCrop(file);
-        if (bandBlob) {
-          const bandResult = await worker.recognize(bandBlob);
-          bandText = bandResult && bandResult.data && bandResult.data.text
-            ? bandResult.data.text
-            : "";
-          bandData = parseJdOrderText(bandText, { allowWithoutJd: true });
-        }
-      } catch (error) {
-        console.warn("JD product crop OCR skipped", error);
-      }
-      if (sheetState !== session) return;
-
-      const merged = {
-        name:
-          (bandData && bandData.nameFromSpec ? bandData.name : "") ||
-          (fullData && fullData.name) ||
-          (bandData && bandData.name) ||
-          "",
-        cost:
-          fullData && fullData.cost !== null
-            ? fullData.cost
-            : bandData && bandData.cost !== null
-              ? bandData.cost
-              : null,
-        qty:
-          (fullData && fullData.qty) ||
-          (bandData && bandData.qty) ||
-          null,
-        orderNo:
-          (fullData && fullData.orderNo) ||
-          (bandData && bandData.orderNo) ||
-          "",
-      };
-      // OCR digits are easy to misread; leave the order number for manual
-      // confirmation rather than writing a plausible-looking wrong number.
-      merged.orderNo = "";
-      setJdOcrStatus("正在整理识别结果…", true);
-      if ((merged.name || merged.cost !== null) && applyJdOrderData(merged)) return;
-      const combinedText = [fullText, bandText].filter(Boolean).join("\n");
-      if (combinedText.trim()) {
-        showJdPastePanel(
-          "图片没识别出完整订单，文字放在下面了，检查后再识别",
-          combinedText.slice(0, 20000),
-        );
-      } else {
-        showJdPastePanel("图片里没读到文字，换一张清晰一点的订单截图");
-      }
-    } catch (error) {
-      console.warn("JD image OCR failed", error);
-      if (sheetState === session) {
-        showJdPastePanel("识图没完成；首次识别需要联网下载识别包。也可以把文字粘贴到这里");
-      }
-    } finally {
-      jdOcrBusy = false;
-      hideJdOcrStatus();
-      if (button) {
-        button.disabled = false;
-        button.removeAttribute("aria-busy");
-      }
-      if (label) label.textContent = "识图";
-    }
   }
 
   function updateEntryPhotoControls() {
@@ -2093,21 +1829,12 @@
           <div class="form-section">
             <div class="name-field-head">
               <label class="field-label" for="entryName">卖出什么 <span>必填</span></label>
-              <div class="name-tools">
-                <button class="jd-capture" id="entryJdPaste" type="button" aria-label="从京东订单识别商品和拿货价" title="先复制京东订单详情，再点这里">
-                  <span class="jd-badge">JD</span><span>识别</span>
-                </button>
-                <button class="jd-capture jd-image" id="entryJdImage" type="button" aria-label="识别京东订单截图" title="选择京东订单截图，自动识别">
-                  ${ICONS.image}<span>识图</span>
-                </button>
-              </div>
+              <button class="jd-capture" id="entryJdPaste" type="button" aria-label="从京东订单识别商品和拿货价" title="先复制京东订单详情，再点这里">
+                <span class="jd-badge">JD</span><span>识别</span>
+              </button>
             </div>
             <input class="field-input name-input" id="entryName" name="name" type="text" maxlength="60" autocomplete="off" placeholder="例如：雅诗兰黛小棕瓶 50ml" value="${esc(record ? record.name : "")}" aria-describedby="entryNameError">
             <div class="field-error" id="entryNameError">先填一下卖了什么</div>
-            <div class="jd-ocr-status" id="jdOcrStatus" hidden>
-              <span class="jd-spinner" aria-hidden="true"></span>
-              <span id="jdOcrStatusText">正在准备识别…</span>
-            </div>
             <div class="jd-paste-panel" id="jdPastePanel" hidden>
               <textarea class="jd-paste-text" id="jdPasteText" rows="4" placeholder="把京东订单详情粘贴到这里，包含「商品名称」和「实付款」即可"></textarea>
               <div class="jd-paste-actions">
@@ -2116,7 +1843,6 @@
               </div>
               <p class="jd-paste-hint">只在本机识别，不会上传订单内容。</p>
             </div>
-            <input id="jdImageInput" type="file" accept="image/*" hidden>
             <div class="category-row" role="group" aria-label="选择分类">
               ${entryCategoryChips(category)}
             </div>
@@ -2327,15 +2053,6 @@
 
     $("#entryJdPaste")?.addEventListener("click", () => {
       importJdOrderFromClipboard();
-    });
-    $("#entryJdImage")?.addEventListener("click", () => {
-      $("#jdImageInput")?.click();
-    });
-    $("#jdImageInput")?.addEventListener("change", async (event) => {
-      const input = event.currentTarget;
-      const file = input.files && input.files[0];
-      input.value = "";
-      if (file) await recognizeJdImage(file);
     });
     $("#jdPasteApply")?.addEventListener("click", applyJdPasteText);
     $("#jdPasteCancel")?.addEventListener("click", hideJdPastePanel);
@@ -3689,7 +3406,7 @@
     openModal({
       title: "w记账怎么用",
       message: "一分钟看懂，之后照着记就行。",
-      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡上点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情点「JD 识别」，或点「识图」选订单截图。识图会优先把「数量 ×1, 规格」里的规格当商品名，把「合计」后的金额当拿货成本；订单号容易识错，暂不自动填。截图在本机 OCR，不上传；首次要联网下载识别包，识别不准可在粘贴框里改。普通京东买家没有官方订单 API。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用。在售库存只算占用成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
+      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡上点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情，点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号；剪贴板被限制时会自动出现粘贴框。普通京东买家没有官方订单 API，这是本机文字解析，不上传。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用。在售库存只算占用成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
       confirmText: "知道了",
       single: true,
       icon: "info",
