@@ -3703,6 +3703,13 @@ body.no-scroll .assistant-dock {
   margin-bottom: 0;
 }
 
+.name-tools {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+}
+
 .jd-capture {
   display: inline-flex;
   height: 26px;
@@ -3719,6 +3726,40 @@ body.no-scroll .assistant-dock {
   transition:
     background 0.15s ease,
     border-color 0.15s ease;
+}
+
+.jd-image svg {
+  width: 12px;
+  height: 12px;
+}
+
+.jd-ocr-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.jd-spinner {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  animation: jd-ocr-spin 0.8s linear infinite;
+}
+
+@keyframes jd-ocr-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .jd-capture:hover {
