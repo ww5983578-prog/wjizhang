@@ -1,14 +1,14 @@
 /* w记账 · offline shell */
-const CACHE_NAME = "wjizhang-shell-v1.4.0";
+const CACHE_NAME = "wjizhang-shell-v1.4.1";
 const SHELL = [
   "./",
   "./index.html",
   "./styles.css",
-  "./styles.css?v=1.4.0",
+  "./styles.css?v=1.4.1",
   "./app.js",
-  "./app.js?v=1.4.0",
+  "./app.js?v=1.4.1",
   "./manifest.webmanifest",
-  "./manifest.webmanifest?v=1.4.0",
+  "./manifest.webmanifest?v=1.4.1",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./icons/icon-maskable-512.png",
