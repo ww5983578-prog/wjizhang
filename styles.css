@@ -3686,6 +3686,131 @@ body.no-scroll .assistant-dock {
   font-weight: 650;
 }
 
+.name-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.name-field-head .field-label {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.jd-capture {
+  display: inline-flex;
+  height: 26px;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-soft);
+  font-size: 9px;
+  font-weight: 700;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.jd-capture:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+
+.jd-capture:disabled {
+  opacity: 0.5;
+}
+
+.jd-badge {
+  display: inline-grid;
+  width: 19px;
+  height: 16px;
+  place-items: center;
+  border-radius: 4px;
+  background: #e2231a;
+  color: #fff;
+  font-family: var(--numeric);
+  font-size: 7.5px;
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  line-height: 1;
+}
+
+.jd-paste-panel {
+  margin-top: 8px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-2);
+}
+
+.jd-paste-text {
+  display: block;
+  width: 100%;
+  min-height: 92px;
+  padding: 9px 11px;
+  resize: vertical;
+  border: 1.5px solid transparent;
+  border-radius: 10px;
+  outline: 0;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.jd-paste-text:focus {
+  border-color: var(--ink);
+  background: #fff;
+}
+
+.jd-paste-text::placeholder {
+  color: var(--muted-2);
+}
+
+.jd-paste-actions {
+  display: flex;
+  gap: 7px;
+  margin-top: 7px;
+}
+
+.jd-paste-apply,
+.jd-paste-cancel {
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.jd-paste-apply {
+  flex: 1;
+  background: var(--ink);
+  color: var(--lime);
+}
+
+.jd-paste-cancel {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.jd-paste-hint {
+  margin-top: 6px;
+  color: var(--muted-2);
+  font-size: 8.5px;
+  line-height: 1.4;
+}
+
 .category-row {
   display: flex;
   gap: 6px;

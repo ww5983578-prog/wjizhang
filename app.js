@@ -7,7 +7,7 @@
 
   const STORAGE_KEY = "niuzhangben.ledger.v1"; // legacy key: keep existing local data
   const ASSISTANT_PREF_KEY = "wjizhang.assistant.hidden.v1";
-  const APP_VERSION = "1.2.0";
+  const APP_VERSION = "1.3.0";
   const MAX_AMOUNT = 99999999;
   const MAX_QTY = 999;
   const MAX_PHOTOS = 6;
@@ -1494,6 +1494,165 @@
     return photos.map((photo, index) => photoThumbMarkup(photo, index)).join("");
   }
 
+  function parseJdOrderText(text) {
+    const raw = String(text || "")
+      .replace(/\r/g, "\n")
+      .replace(/\u00a0/g, " ")
+      .trim();
+    if (!raw || raw.length > 20000) return null;
+    if (!/京东|订单号|订单编号|实付款?|商品名称/.test(raw)) return null;
+
+    const lines = raw
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const pick = (patterns) => {
+      for (const pattern of patterns) {
+        const match = raw.match(pattern);
+        if (match && match[1]) return match[1].trim();
+      }
+      return "";
+    };
+    const cleanName = (value) =>
+      String(value || "")
+        .replace(/(?:数量|件数|商品数量|实付款|实付金额|实付|应付金额|订单号|订单编号|单价|总价)\s*[:：]?.*$/, "")
+        .replace(/[¥￥]\s*[\d,]+(?:\.\d{1,2})?.*$/, "")
+        .replace(/^[【\[]京东[】\]]\s*/, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 60);
+
+    let name = pick([
+      /(?:商品名称|商品名|商品|宝贝|拍品)\s*[:：]\s*([^\n]{2,100})/,
+      /【京东】\s*([^\n]{2,100})/,
+    ]);
+    name = cleanName(name);
+    if (!name || /订单|签收|物流|退款|客服|验证码|收货|地址|电话/.test(name)) {
+      name = cleanName(
+        lines.find((line) => {
+          if (/^[\d\s:：.\-+]+$/.test(line)) return false;
+          if (/^[¥￥]/.test(line)) return false;
+          if (/^【京东】/.test(line)) return false;
+          if (/(订单|实付款|实付|应付|合计|总计|运费|优惠|商品总价|京东价|数量|下单|支付|收货|地址|电话|快递|物流|店铺|客服|退款|售后|发票|备注)/.test(line)) return false;
+          return line.length >= 3 && line.length <= 80;
+        }) || "",
+      );
+    }
+
+    const costRaw = pick([
+      /(?:实付款|实付金额|实付|实际付款|付款金额|在线支付|已付款)\s*[:：]?\s*[¥￥]?\s*([\d,]+(?:\.\d{1,2})?)/,
+      /(?:应付(?:金额)?|订单金额|合计|总计|总金额)\s*[:：]?\s*[¥￥]?\s*([\d,]+(?:\.\d{1,2})?)/,
+    ]);
+    let cost = costRaw ? Number(costRaw.replace(/,/g, "")) : null;
+    if (cost === null) {
+      const amounts = [...raw.matchAll(/[¥￥]\s*([\d,]+(?:\.\d{1,2})?)/g)]
+        .map((match) => Number(match[1].replace(/,/g, "")))
+        .filter((number) => Number.isFinite(number));
+      if (amounts.length) cost = amounts[amounts.length - 1];
+    }
+    if (!Number.isFinite(cost)) cost = null;
+
+    const qtyMatch = raw.match(/(?:数量|件数|商品数量)\s*[:：]?\s*(\d{1,3})/);
+    const qty = qtyMatch ? Number(qtyMatch[1]) : null;
+    const orderMatch = raw.match(/(?:订单号|订单编号)\s*[:：]?\s*([A-Za-z0-9-]{5,})/);
+    const orderNo = orderMatch ? orderMatch[1] : "";
+    if (!name && cost === null) return null;
+    return {
+      name,
+      cost,
+      qty: Number.isFinite(qty) && qty > 0 ? qty : null,
+      orderNo,
+    };
+  }
+
+  function setEntryFieldValue(id, value) {
+    const input = document.getElementById(id);
+    if (!input) return;
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  function showJdPastePanel(message = "", presetText = "") {
+    const panel = $("#jdPastePanel");
+    const text = $("#jdPasteText");
+    if (!panel || !text) return;
+    panel.hidden = false;
+    if (presetText && !text.value) text.value = presetText;
+    if (message) showToast(message);
+    window.setTimeout(() => text.focus({ preventScroll: false }), 40);
+  }
+
+  function hideJdPastePanel() {
+    const panel = $("#jdPastePanel");
+    const text = $("#jdPasteText");
+    if (panel) panel.hidden = true;
+    if (text) text.value = "";
+  }
+
+  function applyJdOrderData(data) {
+    if (!sheetState || !data) return false;
+    if (data.name) setEntryFieldValue("entryName", data.name);
+    if (data.cost !== null && data.cost !== undefined) {
+      setEntryFieldValue(
+        "entryCost",
+        Number.isInteger(data.cost) ? String(data.cost) : data.cost.toFixed(2),
+      );
+    }
+    if (data.qty && data.qty > 1) setQty(data.qty);
+    if (data.orderNo) {
+      const note = $("#entryNote");
+      if (note && !note.value.includes(data.orderNo)) {
+        note.value = [note.value.trim(), `京东订单号：${data.orderNo}`]
+          .filter(Boolean)
+          .join(" · ")
+          .slice(0, 200);
+        note.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    }
+    hideJdPastePanel();
+    updateLivePreview();
+    if (data.cost === null) {
+      showToast("已填入商品名，但没识别到实付价，手动补一下");
+    } else {
+      showToast(`已识别京东订单 · 实付 ${formatMoney(data.cost)}`);
+    }
+    return true;
+  }
+
+  async function importJdOrderFromClipboard() {
+    if (!sheetState) return;
+    const button = $("#entryJdPaste");
+    if (!button || button.disabled) return;
+    if (!navigator.clipboard || typeof navigator.clipboard.readText !== "function") {
+      showJdPastePanel("浏览器不支持读剪贴板，把订单内容粘贴到这里");
+      return;
+    }
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text || !text.trim()) {
+        showJdPastePanel("剪贴板是空的，复制京东订单后再点一次");
+        return;
+      }
+      const data = parseJdOrderText(text);
+      if (data && applyJdOrderData(data)) return;
+      showJdPastePanel("没识别到京东订单，粘贴到这里再试", text);
+    } catch (error) {
+      showJdPastePanel("浏览器没给剪贴板权限，粘贴订单内容到这里");
+    } finally {
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
+  }
+
+  function applyJdPasteText() {
+    const text = $("#jdPasteText")?.value || "";
+    const data = parseJdOrderText(text);
+    if (data && applyJdOrderData(data)) return;
+    showToast("没识别到商品和实付价，把京东订单详情完整粘贴进来", "error");
+  }
+
   function updateEntryPhotoControls() {
     const grid = $("#entryPhotoGrid");
     const add = $("#entryPhotoAdd");
@@ -1663,9 +1822,22 @@
           ${statusToggle}
 
           <div class="form-section">
-            <label class="field-label" for="entryName">卖出什么 <span>必填</span></label>
+            <div class="name-field-head">
+              <label class="field-label" for="entryName">卖出什么 <span>必填</span></label>
+              <button class="jd-capture" id="entryJdPaste" type="button" aria-label="从京东订单识别商品和拿货价" title="先复制京东订单详情，再点这里">
+                <span class="jd-badge">JD</span><span>识别</span>
+              </button>
+            </div>
             <input class="field-input name-input" id="entryName" name="name" type="text" maxlength="60" autocomplete="off" placeholder="例如：雅诗兰黛小棕瓶 50ml" value="${esc(record ? record.name : "")}" aria-describedby="entryNameError">
             <div class="field-error" id="entryNameError">先填一下卖了什么</div>
+            <div class="jd-paste-panel" id="jdPastePanel" hidden>
+              <textarea class="jd-paste-text" id="jdPasteText" rows="4" placeholder="把京东订单详情粘贴到这里，包含「商品名称」和「实付款」即可"></textarea>
+              <div class="jd-paste-actions">
+                <button class="jd-paste-apply" id="jdPasteApply" type="button">识别并填入</button>
+                <button class="jd-paste-cancel" id="jdPasteCancel" type="button">收起</button>
+              </div>
+              <p class="jd-paste-hint">只在本机识别，不会上传订单内容。</p>
+            </div>
             <div class="category-row" role="group" aria-label="选择分类">
               ${entryCategoryChips(category)}
             </div>
@@ -1873,6 +2045,12 @@
       input.value = "";
       await handlePhotoFiles(files);
     });
+
+    $("#entryJdPaste")?.addEventListener("click", () => {
+      importJdOrderFromClipboard();
+    });
+    $("#jdPasteApply")?.addEventListener("click", applyJdPasteText);
+    $("#jdPasteCancel")?.addEventListener("click", hideJdPastePanel);
   }
 
   function setQty(value) {
@@ -3223,7 +3401,7 @@
     openModal({
       title: "w记账怎么用",
       message: "一分钟看懂，之后照着记就行。",
-      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡上点“卖出”，补上收入即可。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用。在售库存只算占用成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
+      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡上点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情（含商品名称和实付款），点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号。普通京东买家没有官方订单 API，所以这是本机剪贴板识别，不上传；剪贴板被限制时会自动出现粘贴框。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用。在售库存只算占用成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
       confirmText: "知道了",
       single: true,
       icon: "info",
