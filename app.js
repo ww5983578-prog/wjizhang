@@ -7,7 +7,8 @@
 
   const STORAGE_KEY = "niuzhangben.ledger.v1"; // legacy key: keep existing local data
   const ASSISTANT_PREF_KEY = "wjizhang.assistant.hidden.v1";
-  const APP_VERSION = "1.5.1";
+  const AI_CONFIG_KEY = "wjizhang.ai.v1";
+  const APP_VERSION = "1.6.0";
   const MAX_AMOUNT = 99999999;
   const MAX_QTY = 999;
   const MAX_PHOTOS = 6;
@@ -28,6 +29,24 @@
     // 旧分类不再出现在选择器里，但已有账目保留原标签，避免历史数据被改写。
     票务: { char: "票", className: "cat-ticket", color: "#e9825b" },
     潮玩: { char: "玩", className: "cat-toy", color: "#df6da4" },
+  });
+  const AI_PRESETS = Object.freeze({
+    deepseek: {
+      label: "DeepSeek",
+      baseUrl: "https://api.deepseek.com/v1",
+      model: "deepseek-chat",
+    },
+    openai: {
+      label: "OpenAI",
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-4o-mini",
+    },
+    kimi: {
+      label: "Kimi / Moonshot",
+      baseUrl: "https://api.moonshot.cn/v1",
+      model: "moonshot-v1-8k",
+    },
+    custom: { label: "自定义", baseUrl: "", model: "" },
   });
 
   const ICONS = {
@@ -83,6 +102,7 @@
   let lastSheetFocus = null;
   let bootStorageError = false;
   let assistantDismissed = false;
+  let aiConfig = null;
   let photoDbPromise = null;
   let photoViewerUrl = null;
   let photoViewerLastFocus = null;
@@ -92,6 +112,7 @@
     typing: false,
     closeTimer: null,
     replyTimer: null,
+    aiRequestSeq: 0,
     lastFocus: null,
     seq: 0,
   };
@@ -1306,6 +1327,389 @@
     ${body}`;
   }
 
+  function normalizeAiConfig(raw) {
+    const source = raw && typeof raw === "object" ? raw : {};
+    return {
+      enabled: source.enabled === true,
+      baseUrl: String(source.baseUrl || "")
+        .trim()
+        .replace(/\/+$/, "")
+        .slice(0, 300),
+      model: String(source.model || "").trim().slice(0, 120),
+      key: String(source.key || "").trim().slice(0, 500),
+      updatedAt: String(source.updatedAt || ""),
+    };
+  }
+
+  function readAiConfig() {
+    try {
+      const raw = window.localStorage.getItem(AI_CONFIG_KEY);
+      return raw ? normalizeAiConfig(JSON.parse(raw)) : normalizeAiConfig({});
+    } catch (error) {
+      console.warn("Could not read AI settings", error);
+      return normalizeAiConfig({});
+    }
+  }
+
+  function persistAiConfig(config) {
+    const next = normalizeAiConfig({
+      ...config,
+      updatedAt: new Date().toISOString(),
+    });
+    try {
+      window.localStorage.setItem(AI_CONFIG_KEY, JSON.stringify(next));
+      aiConfig = next;
+      return true;
+    } catch (error) {
+      console.warn("Could not save AI settings", error);
+      return false;
+    }
+  }
+
+  function aiConfigured() {
+    const config = aiConfig || normalizeAiConfig({});
+    return Boolean(
+      config.enabled &&
+        config.baseUrl &&
+        config.model &&
+        config.key,
+    );
+  }
+
+  function aiReady() {
+    return aiConfigured() && navigator.onLine !== false;
+  }
+
+  function aiBaseUrlValid(value) {
+    try {
+      const url = new URL(String(value || ""));
+      if (url.protocol === "https:") return true;
+      return (
+        url.protocol === "http:" &&
+        (url.hostname === "127.0.0.1" || url.hostname === "localhost")
+      );
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function aiEndpoint(baseUrl) {
+    const base = String(baseUrl || "").trim().replace(/\/+$/, "");
+    if (/\/chat\/completions$/i.test(base)) return base;
+    return `${base}/chat/completions`;
+  }
+
+  function aiErrorMessage(error) {
+    if (error && error.code === "timeout") {
+      return "AI 接口超时了，先用本地奶娃回答。";
+    }
+    if (error && error.status === 401) {
+      return "AI 接口说 Key 不对（401），请到「我的 → AI 助手」检查。";
+    }
+    if (error && error.status === 403) {
+      return "AI 接口拒绝访问（403），可能是 Key 没权限或模型不可用。";
+    }
+    if (error && error.status === 404) {
+      return "AI 接口地址或模型名不对（404），请检查设置。";
+    }
+    if (error && error.status === 429) {
+      return "AI 接口限流或余额不足（429），稍后再试。";
+    }
+    if (error && error.name === "TypeError") {
+      return "AI 接口没连上，可能是浏览器直连被 CORS 拦截，或网络不通。";
+    }
+    return "AI 接口没接上，先用本地奶娃回答。";
+  }
+
+  async function callAiApi(config, messages, options = {}) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort(),
+      options.timeoutMs || 35000,
+    );
+    try {
+      const response = await fetch(aiEndpoint(config.baseUrl), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${config.key}`,
+        },
+        body: JSON.stringify({
+          model: config.model,
+          messages,
+          temperature: options.temperature ?? 0.35,
+          max_tokens: options.maxTokens || 700,
+          stream: false,
+        }),
+        signal: controller.signal,
+      });
+      const rawText = await response.text();
+      let data = null;
+      try {
+        data = rawText ? JSON.parse(rawText) : null;
+      } catch (error) {
+        data = null;
+      }
+      if (!response.ok) {
+        const apiMessage =
+          data && data.error && data.error.message
+            ? String(data.error.message).slice(0, 160)
+            : "";
+        const error = new Error(
+          `AI API ${response.status}${apiMessage ? `: ${apiMessage}` : ""}`,
+        );
+        error.status = response.status;
+        throw error;
+      }
+      const message =
+        data && data.choices && data.choices[0] && data.choices[0].message;
+      let content = message && message.content;
+      if (Array.isArray(content)) {
+        content = content
+          .map((part) => (part && typeof part.text === "string" ? part.text : ""))
+          .join("");
+      }
+      if (typeof content !== "string" || !content.trim()) {
+        throw new Error("AI returned an empty answer");
+      }
+      return content.trim().slice(0, 8000);
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        const timeoutError = new Error("AI request timed out");
+        timeoutError.code = "timeout";
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+
+  function buildAiContextText() {
+    const current = monthSummary(currentMonthKey());
+    const totals = allTimeSummary();
+    const stock = stockSummary();
+    const categories = getCategoryBreakdown(currentMonthKey()).groups
+      .map((group) => `${group.category} ${formatMoney(group.revenue)}（${group.count} 单）`)
+      .join("、");
+    const recent = records
+      .slice()
+      .sort(recordOrder)
+      .slice(0, 24)
+      .map((record) => {
+        const rebate = rebateOf(record);
+        const status = record.status === "stock" ? "在售" : "已售";
+        const soldNumbers =
+          record.status === "sold"
+            ? ` 收入${formatMoney(record.revenue)} 费用${formatMoney(record.fees)} 利润${formatMoney(profitOf(record), { sign: true })}`
+            : "";
+        return `${record.date} ${status} ${record.category} ${record.name}${record.qty > 1 ? `×${record.qty}` : ""} 成本${formatMoney(record.cost)} 净成本${formatMoney(netCostOf(record))}${rebate ? `（返利${formatMoney(rebate)}）` : ""}${soldNumbers}`;
+      })
+      .join("\n");
+    return `今天：${todayISO()}
+本月：成交 ${current.count} 单，收入 ${formatMoney(current.revenue)}，净成本 ${formatMoney(current.cost)}，费用 ${formatMoney(current.fees)}，净赚 ${formatMoney(current.profit, { sign: true })}。
+累计：已售 ${totals.count} 单，净赚 ${formatMoney(totals.profit, { sign: true })}；在售 ${stock.count} 笔/${stock.units} 件，占用 ${formatMoney(stock.cost)}。
+本月分类收入：${categories || "暂无"}。
+最近账目（最多 24 笔）：
+${recent || "暂无账目"}`;
+  }
+
+  function buildAiSystemPrompt() {
+    return `你是 w记账 App 里的 AI 账本助手，服务一个做转卖（搬砖）的个人卖家。
+只依据下面提供的账本摘要回答，不要编造数字；金额用人民币，语气简洁直接，先给结论，必要时给 2-4 条可执行建议。
+利润公式：卖出收入 − 拿货成本 − 其他费用 + 平台返利；净成本 = 拿货成本 − 平台返利。
+不能直接修改、保存或删除账目；需要这些操作时，让用户在界面里自己点。
+如果用户问的内容超出账本数据，直接说明“账本里没有这个信息”，不要瞎猜。
+
+账本摘要：
+${buildAiContextText()}`;
+  }
+
+  function buildAiConversation() {
+    const history = assistant.messages
+      .slice(-7, -1)
+      .filter((message) => message && (message.role === "user" || message.role === "assistant"))
+      .map((message) => ({
+        role: message.role,
+        content: String(message.text || "").slice(0, 1200),
+      }))
+      .filter((message) => message.content);
+    return history;
+  }
+
+  async function requestAiReply(text) {
+    if (!aiReady()) throw new Error("AI is not configured");
+    const content = await callAiApi(
+      aiConfig,
+      [
+        { role: "system", content: buildAiSystemPrompt() },
+        ...buildAiConversation(),
+        { role: "user", content: text },
+      ],
+      { maxTokens: 700 },
+    );
+    return { text: content, actions: [], source: "ai" };
+  }
+
+  function shouldUseAi(text) {
+    if (!aiReady()) return false;
+    const compact = String(text).replace(/\s+/g, "").toLowerCase();
+    const operational =
+      /记一单|记一笔|记账|开一单|录一单|帮我记|记个账|记库存|入库|先入库|收货|压货|打开统计|看统计|统计页|图表|报表|打开账本|看账本|明细|流水|记录列表|打开设置|设置页|备份设置|清空|删除|导出|导入|备份|换手机|安装|加到桌面|添加到桌面|离线用|怎么用|怎么记|怎么操作|如何用|如何记|使用说明|教我|不会用|别人|一起用|共享|多人|合伙|团队|几个人|共用|登录|账号/.test(
+        compact,
+      );
+    if (operational) return false;
+    const aiIntent =
+      /分析|建议|为什么|怎么优化|优化|定价|行情|策略|文案|评价|对比|推荐|如果|如何|觉得|看法|帮我看看|解释|规划|复盘|判断|是否值得/.test(
+        compact,
+      );
+    if (aiIntent) return true;
+    if (/利润怎么算|怎么算利润|怎么计算|计算公式|公式/.test(compact)) return false;
+    if (
+      /本月|上个月|今天|昨天|累计|赚|盈利|利润|营收|收入|成本|费用|毛利|成交|查账|看账|库存|在售|亏损|最赚/.test(
+        compact,
+      )
+    ) {
+      return false;
+    }
+    if (/^(你好|嗨|hi|hello|在吗|哈喽|谢谢|多谢|感谢)/.test(compact)) return false;
+    return true;
+  }
+
+  function aiSettingsMarkup() {
+    const config = aiConfig || normalizeAiConfig({});
+    const configured = aiConfigured();
+    const preset = Object.entries(AI_PRESETS).find(
+      ([, item]) =>
+        item.baseUrl === config.baseUrl && item.model === config.model,
+    );
+    const presetValue = preset ? preset[0] : "custom";
+    const status = configured
+      ? `${config.enabled ? "已启用" : "已保存但未启用"} · ${config.model}`
+      : "未启用 · 奶娃只在本机回答";
+    return `<p class="settings-group-label">AI 助手</p>
+    <div class="settings-group ai-card">
+      <div class="ai-card-head">
+        <span class="settings-icon ai-setting-icon" aria-hidden="true">AI</span>
+        <span class="settings-copy"><b>接入外部 AI</b><span>${esc(status)}</span></span>
+        <label class="ai-check"><input id="aiEnabled" type="checkbox" ${config.enabled ? "checked" : ""}> 启用</label>
+      </div>
+      <div class="ai-form">
+        <label class="ai-field"><span>服务商预设</span>
+          <select id="aiPreset">
+            ${Object.entries(AI_PRESETS)
+              .map(
+                ([key, item]) =>
+                  `<option value="${esc(key)}" ${key === presetValue ? "selected" : ""}>${esc(item.label)}</option>`,
+              )
+              .join("")}
+          </select>
+        </label>
+        <label class="ai-field"><span>接口地址</span><input id="aiBaseUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://api.deepseek.com/v1" value="${esc(config.baseUrl)}"></label>
+        <label class="ai-field"><span>模型</span><input id="aiModel" type="text" autocomplete="off" placeholder="deepseek-chat" value="${esc(config.model)}"></label>
+        <label class="ai-field"><span>API Key</span><input id="aiKey" type="password" autocomplete="new-password" placeholder="${config.key ? "已保存，留空不修改" : "sk-... 只存本机"}" value=""></label>
+        <div class="ai-actions">
+          <button class="ai-btn is-primary" type="button" data-action="ai-save">保存</button>
+          <button class="ai-btn" type="button" data-action="ai-test">测试连接</button>
+          <button class="ai-btn" type="button" data-action="ai-clear">清除 Key</button>
+        </div>
+        <p class="ai-status" id="aiTestStatus">${configured ? "Key 已保存在本机，不在 JSON 备份里。" : "填好接口、模型和 Key，保存后才会启用。"}</p>
+        <p class="ai-hint">Key 只存在这台设备的浏览器里，公共设备不要保存。启用后，提问会把账本摘要发送到你填写的接口；AI 不能直接改账，保存/删除仍由你确认。浏览器直连若被 CORS 拦截，需要改用带后端的代理地址。</p>
+      </div>
+    </div>`;
+  }
+
+  function readerAiFormConfig() {
+    const baseInput = $("#aiBaseUrl");
+    const modelInput = $("#aiModel");
+    const keyInput = $("#aiKey");
+    const enabledInput = $("#aiEnabled");
+    if (!baseInput || !modelInput || !keyInput || !enabledInput) return null;
+    return normalizeAiConfig({
+      enabled: enabledInput.checked,
+      baseUrl: baseInput.value,
+      model: modelInput.value,
+      key: keyInput.value.trim() || (aiConfig && aiConfig.key) || "",
+    });
+  }
+
+  async function saveAiSettings() {
+    const config = readerAiFormConfig();
+    if (!config) return;
+    if (config.enabled && (!config.baseUrl || !config.model || !config.key)) {
+      showToast("启用 AI 前要填好接口地址、模型和 API Key", "error");
+      return;
+    }
+    if (config.baseUrl && !aiBaseUrlValid(config.baseUrl)) {
+      showToast("接口地址要用 https://；本机测试才允许 localhost", "error");
+      return;
+    }
+    if (!persistAiConfig(config)) {
+      showToast("AI 设置保存失败，请检查浏览器存储权限", "error");
+      return;
+    }
+    renderApp();
+    showToast(config.enabled ? "AI 助手已启用" : "AI 设置已保存");
+  }
+
+  async function testAiSettings() {
+    const config = readerAiFormConfig();
+    const status = $("#aiTestStatus");
+    if (!config) return;
+    if (!config.baseUrl || !config.model || !config.key) {
+      if (status) status.textContent = "测试前先填好接口地址、模型和 Key。";
+      return;
+    }
+    if (!aiBaseUrlValid(config.baseUrl)) {
+      if (status) status.textContent = "接口地址要用 https://；本机测试才允许 localhost。";
+      return;
+    }
+    if (status) status.textContent = "正在连接 AI 接口…";
+    try {
+      const answer = await callAiApi(
+        config,
+        [
+          {
+            role: "system",
+            content: "只回复 OK，不要解释。",
+          },
+          { role: "user", content: "连接测试" },
+        ],
+        { maxTokens: 8, timeoutMs: 20000, temperature: 0 },
+      );
+      if (status) {
+        status.textContent = `连接成功：${answer.slice(0, 40)}`;
+      }
+    } catch (error) {
+      if (status) status.textContent = aiErrorMessage(error);
+    }
+  }
+
+  function clearAiKey() {
+    const config = normalizeAiConfig({
+      ...(aiConfig || {}),
+      enabled: false,
+      key: "",
+    });
+    if (!persistAiConfig(config)) {
+      showToast("清除失败，请再试一次", "error");
+      return;
+    }
+    renderApp();
+    showToast("已清除本机保存的 AI Key");
+  }
+
+  function applyAiPreset() {
+    const preset = $("#aiPreset");
+    if (!preset) return;
+    const item = AI_PRESETS[preset.value];
+    if (!item || !item.baseUrl) return;
+    const base = $("#aiBaseUrl");
+    const model = $("#aiModel");
+    if (base) base.value = item.baseUrl;
+    if (model) model.value = item.model;
+  }
+
   function renderSettings() {
     const totals = allTimeSummary();
     const stock = stockSummary();
@@ -1359,6 +1763,8 @@
         <span class="settings-toggle ${assistantDismissed ? "" : "is-on"}" aria-hidden="true"></span>
       </button>
     </div>
+
+    ${aiSettingsMarkup()}
 
     <p class="settings-group-label">数据与备份</p>
     <div class="settings-group">
@@ -1434,6 +1840,10 @@
   }
 
   function bindPage() {
+    if (state.route === "settings") {
+      $("#aiPreset")?.addEventListener("change", applyAiPreset);
+      return;
+    }
     if (state.route !== "ledger") return;
     const input = $("#ledgerSearch");
     if (input) {
@@ -2592,13 +3002,15 @@
         <img src="./icons/naiba-avatar-idle.png" alt="">
       </span>
       <div class="assistant-bubble-wrap">
-        <div class="assistant-bubble">${esc(message.text)}</div>
+        <div class="assistant-bubble">${message.source === "ai" ? `<span class="ai-source-pill">AI</span>` : ""}${esc(message.text)}</div>
         ${actionMarkup}
       </div>
     </div>`;
   }
 
   function assistantSheetTemplate() {
+    const aiOn = aiConfigured();
+    const aiOnline = aiReady();
     return `<div class="sheet-grabber" aria-hidden="true"></div>
       <div class="assistant-head">
         <div class="naiba-profile">
@@ -2607,8 +3019,8 @@
             <img class="is-glance" src="./icons/naiba-avatar-glance.png" alt="">
           </span>
           <div class="assistant-title-block">
-            <div class="assistant-name" id="assistantTitle">奶娃 <span class="local-pill">本地</span></div>
-            <div class="assistant-status"><span class="assistant-status-dot"></span>看账 · 算账 · 只在本机</div>
+            <div class="assistant-name" id="assistantTitle">奶娃 <span class="${aiOn ? "ai-pill" : "local-pill"}">${aiOn ? "AI" : "本地"}</span></div>
+            <div class="assistant-status"><span class="assistant-status-dot"></span>${aiOn ? (aiOnline ? "AI 远程 · 只发账本摘要" : "AI 已配置 · 离线时用本地") : "看账 · 算账 · 只在本机"}</div>
           </div>
         </div>
         <div class="assistant-head-actions">
@@ -2692,6 +3104,7 @@
   function resetAssistant() {
     window.clearTimeout(assistant.replyTimer);
     assistant.replyTimer = null;
+    assistant.aiRequestSeq += 1;
     assistant.typing = false;
     assistant.messages = [];
     assistant.seq = 0;
@@ -2738,7 +3151,7 @@
     }
   }
 
-  function sendAssistantText(raw) {
+  async function sendAssistantText(raw) {
     if (assistantLayer.hidden || assistant.typing) return;
     const text = String(raw || "").trim().slice(0, 200);
     if (!text) return;
@@ -2748,32 +3161,47 @@
       text,
     });
     assistant.typing = true;
+    const requestId = ++assistant.aiRequestSeq;
     const input = $("#assistantInput");
     if (input) input.value = "";
     renderAssistantMessages();
 
-    let reply;
+    let localReply;
     try {
-      reply = buildAssistantReply(text);
+      localReply = buildAssistantReply(text);
     } catch (error) {
       console.warn("Assistant reply failed", error);
-      reply = {
+      localReply = {
         text: "我刚刚算账时卡了一下，再问我一次？",
         actions: [],
       };
     }
-    window.clearTimeout(assistant.replyTimer);
-    assistant.replyTimer = window.setTimeout(() => {
-      assistant.replyTimer = null;
-      assistant.typing = false;
-      assistant.messages.push({
-        id: `a${++assistant.seq}`,
-        role: "assistant",
-        text: reply.text,
-        actions: reply.actions || [],
-      });
-      if (!assistantLayer.hidden) renderAssistantMessages();
-    }, 520);
+
+    let reply = localReply;
+    if (shouldUseAi(text)) {
+      try {
+        reply = await requestAiReply(text);
+      } catch (error) {
+        if (requestId !== assistant.aiRequestSeq) return;
+        reply = {
+          ...localReply,
+          text: `${aiErrorMessage(error)}\n\n先用本地奶娃回答：\n${localReply.text}`,
+          actions: localReply.actions || [],
+          source: "local",
+        };
+      }
+    }
+
+    if (requestId !== assistant.aiRequestSeq) return;
+    assistant.typing = false;
+    assistant.messages.push({
+      id: `a${++assistant.seq}`,
+      role: "assistant",
+      text: reply.text,
+      actions: reply.actions || [],
+      source: reply.source || "local",
+    });
+    if (!assistantLayer.hidden) renderAssistantMessages();
   }
 
   function assistantRangeFromText(text) {
@@ -3096,7 +3524,7 @@
     if (/最赚|最挣|最高|利润最高|赚最多/.test(compact)) {
       return assistantBestReply(range);
     }
-    if (/打开统计|看统计|统计页|图表|报表|分析/.test(compact)) {
+    if (/打开统计|看统计|统计页|图表|报表/.test(compact) || (!aiReady() && /分析/.test(compact))) {
       return {
         text: "统计页在这，点下面带你过去。",
         actions: [{ label: "打开统计", type: "navigate", route: "stats" }],
@@ -3423,6 +3851,15 @@
       case "toggle-assistant":
         setAssistantDismissed(!assistantDismissed);
         break;
+      case "ai-save":
+        await saveAiSettings();
+        break;
+      case "ai-test":
+        await testAiSettings();
+        break;
+      case "ai-clear":
+        clearAiKey();
+        break;
       case "help":
         showHelp();
         break;
@@ -3496,7 +3933,7 @@
     openModal({
       title: "w记账怎么用",
       message: "一分钟看懂，之后照着记就行。",
-      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡，或账本页在售行右侧点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情，点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号；剪贴板被限制时会自动出现粘贴框。普通京东买家没有官方订单 API，这是本机文字解析，不上传。<br><br><b>平台返利</b><br>返利会从拿货成本里扣，利润自动加回来；返利不能大于拿货成本。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用 + 平台返利。在售库存只算返利后成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
+      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡，或账本页在售行右侧点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情，点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号；剪贴板被限制时会自动出现粘贴框。普通京东买家没有官方订单 API，这是本机文字解析，不上传。<br><br><b>平台返利</b><br>返利会从拿货成本里扣，利润自动加回来；返利不能大于拿货成本。<br><br><b>AI 助手</b><br>在「我的 → AI 助手」填 OpenAI 兼容接口、模型和 Key 后可接外部 AI；自由分析走 AI，查账/记账仍用本地奶娃。Key 只存本机，不进备份；启用后提问会把账本摘要发到该接口。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用 + 平台返利。在售库存只算返利后成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
       confirmText: "知道了",
       single: true,
       icon: "info",
@@ -3877,6 +4314,11 @@
     window.addEventListener("offline", updateOnlineState);
 
     window.addEventListener("storage", (event) => {
+      if (event.key === AI_CONFIG_KEY) {
+        aiConfig = readAiConfig();
+        if (state.route === "settings") renderApp();
+        return;
+      }
       if (event.key !== STORAGE_KEY) return;
       if (!sheetLayer.hidden || !modalLayer.hidden || !assistantLayer.hidden) {
         return;
@@ -3909,6 +4351,7 @@
     records = boot.records;
     bootStorageError = boot.error || false;
     assistantDismissed = readAssistantPreference();
+    aiConfig = readAiConfig();
     applyAssistantDockVisibility();
     state.route = getRouteFromHash();
     state.statsMonth = currentMonthKey();
