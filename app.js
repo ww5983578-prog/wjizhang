@@ -8,7 +8,7 @@
   const STORAGE_KEY = "niuzhangben.ledger.v1"; // legacy key: keep existing local data
   const ASSISTANT_PREF_KEY = "wjizhang.assistant.hidden.v1";
   const AI_CONFIG_KEY = "wjizhang.ai.v1";
-  const APP_VERSION = "1.7.0";
+  const APP_VERSION = "1.7.1";
   const MAX_AMOUNT = 99999999;
   const MAX_QTY = 999;
   const MAX_PHOTOS = 6;
@@ -1725,7 +1725,60 @@ JSON 字段：
     return normalizeAiEntry(parseAiEntryJson(content));
   }
 
-  function assistantImageReply(entry) {
+  function dataUrlToBlob(dataUrl) {
+    const value = String(dataUrl || "");
+    const comma = value.indexOf(",");
+    if (comma < 0) throw new Error("Invalid image data");
+    const header = value.slice(0, comma);
+    const payload = value.slice(comma + 1);
+    const mimeMatch = header.match(/data:([^;]+)/);
+    const mime = mimeMatch ? mimeMatch[1] : "image/jpeg";
+    const binary = atob(payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+
+  async function attachAiImageToEntry(dataUrl) {
+    const session = sheetState;
+    if (!session || !dataUrl) return;
+    if (session.photos.length >= MAX_PHOTOS) {
+      showToast("备注图片已满，识图原图没有加上");
+      return;
+    }
+    session.photoBusy = true;
+    updateEntryPhotoControls();
+    requestPersistentStorage();
+    try {
+      const blob = dataUrlToBlob(dataUrl);
+      const file = new File([blob], "AI识图-订单.jpg", {
+        type: blob.type || "image/jpeg",
+      });
+      const meta = await addPhotoFile(file);
+      if (sheetState !== session || session.closing) {
+        await deletePhotoBlobs([meta.id]);
+        return;
+      }
+      if (session.photos.length >= MAX_PHOTOS) {
+        await deletePhotoBlobs([meta.id]);
+        showToast("备注图片已满，识图原图没有加上");
+        return;
+      }
+      session.photos.push(meta);
+      session.newPhotoIds.add(meta.id);
+      showToast("识图原图已加到备注图片");
+    } catch (error) {
+      console.warn("Could not attach AI image", error);
+      showToast("识图原图没加上，可以手动添加图片", "error");
+    } finally {
+      if (sheetState === session) {
+        session.photoBusy = false;
+        updateEntryPhotoControls();
+      }
+    }
+  }
+
+  function assistantImageReply(entry, imageDataUrl) {
     const parts = [];
     if (entry.name) parts.push(`商品：${entry.name}`);
     if (entry.cost !== null) parts.push(`拿货成本：${formatMoney(entry.cost)}`);
@@ -1748,6 +1801,7 @@ JSON 字段：
               label: "核对并入账",
               type: "entry",
               status: entry.status,
+              imageDataUrl,
               prefill: {
                 name: entry.name,
                 cost: entry.cost !== null ? entry.cost : "",
@@ -1772,7 +1826,7 @@ JSON 字段：
       };
     }
     return {
-      text: `${summaryText}我从图里整理出这是「${statusText}」：\n${parts.join("\n")}${confidenceText}\n点下面的按钮核对，确认后再保存。`,
+      text: `${summaryText}我从图里整理出这是「${statusText}」：\n${parts.join("\n")}${confidenceText}\n点下面的按钮核对，原图会一起放进这笔账的备注图片，确认后再保存。`,
       actions,
       source: "ai",
     };
@@ -1813,7 +1867,7 @@ JSON 字段：
       const entry = await requestAiImageEntry(dataUrl);
       if (requestId !== assistant.aiRequestSeq) return;
       assistant.typing = false;
-      const reply = assistantImageReply(entry);
+      const reply = assistantImageReply(entry, dataUrl);
       assistant.messages.push({
         id: `a${++assistant.seq}`,
         role: "assistant",
@@ -3355,7 +3409,7 @@ JSON 字段：
           <input id="assistantInput" type="text" maxlength="200" autocomplete="off" enterkeyhint="send" placeholder="问奶娃：本月赚了多少？" aria-label="对奶娃说">
           <button class="assistant-send" id="assistantSend" type="submit" aria-label="发送">${ICONS.send}</button>
         </form>
-        <p class="assistant-image-note">发图会用 AI 识别，识别后先生成单子，核对再保存。</p>
+        <p class="assistant-image-note">发图会用 AI 识别，原图会一起放进这笔账的备注图片，核对后再保存。</p>
       </div>`;
   }
 
@@ -3914,6 +3968,11 @@ JSON 字段：
           status: action.status === "stock" ? "stock" : "sold",
           prefill: action.prefill || {},
         });
+        if (action.imageDataUrl) {
+          attachAiImageToEntry(action.imageDataUrl).catch((error) => {
+            console.warn("Could not attach image to entry", error);
+          });
+        }
       } else if (action.type === "navigate") {
         navigate(action.route || "home");
       }
@@ -4246,7 +4305,7 @@ JSON 字段：
     openModal({
       title: "w记账怎么用",
       message: "一分钟看懂，之后照着记就行。",
-      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡，或账本页在售行右侧点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情，点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号；剪贴板被限制时会自动出现粘贴框。普通京东买家没有官方订单 API，这是本机文字解析，不上传。<br><br><b>平台返利</b><br>返利会从拿货成本里扣，利润自动加回来；返利不能大于拿货成本。<br><br><b>AI 助手</b><br>在「我的 → AI 助手」填 OpenAI 兼容接口、模型和 Key 后可接外部 AI；自由分析走 AI，查账/记账仍用本地奶娃。DeepSeek 用 deepseek-flash，支持在奶娃里点「发图记账」识别订单截图，识别后先生成待确认单子，核对再保存。Key 只存本机，不进备份；启用后提问/发图会把账本摘要或图片发到该接口。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用 + 平台返利。在售库存只算返利后成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
+      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡，或账本页在售行右侧点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情，点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号；剪贴板被限制时会自动出现粘贴框。普通京东买家没有官方订单 API，这是本机文字解析，不上传。<br><br><b>平台返利</b><br>返利会从拿货成本里扣，利润自动加回来；返利不能大于拿货成本。<br><br><b>AI 助手</b><br>在「我的 → AI 助手」填 OpenAI 兼容接口、模型和 Key 后可接外部 AI；自由分析走 AI，查账/记账仍用本地奶娃。DeepSeek 用 deepseek-flash，支持在奶娃里点「发图记账」识别订单截图，识别后先生成待确认单子，原图会一起放进备注图片，核对再保存。Key 只存本机，不进备份；启用后提问/发图会把账本摘要或图片发到该接口。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用 + 平台返利。在售库存只算返利后成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
       confirmText: "知道了",
       single: true,
       icon: "info",
