@@ -7,7 +7,7 @@
 
   const STORAGE_KEY = "niuzhangben.ledger.v1"; // legacy key: keep existing local data
   const ASSISTANT_PREF_KEY = "wjizhang.assistant.hidden.v1";
-  const APP_VERSION = "1.4.2";
+  const APP_VERSION = "1.5.0";
   const MAX_AMOUNT = 99999999;
   const MAX_QTY = 999;
   const MAX_PHOTOS = 6;
@@ -226,11 +226,20 @@
     return CATEGORY_NAMES.includes(name) ? name : DEFAULT_CATEGORY;
   }
 
+  function rebateOf(record) {
+    const rebate = Number(record && record.rebate);
+    return Number.isFinite(rebate) && rebate > 0 ? roundMoney(rebate) : 0;
+  }
+
+  function netCostOf(record) {
+    return roundMoney((Number(record && record.cost) || 0) - rebateOf(record));
+  }
+
   function profitOf(record) {
     if (!record || record.status !== "sold") return 0;
     return roundMoney(
       (Number(record.revenue) || 0) -
-        (Number(record.cost) || 0) -
+        netCostOf(record) -
         (Number(record.fees) || 0),
     );
   }
@@ -582,6 +591,10 @@
     const cost = parseAmount(raw.cost) ?? 0;
     const fees = parseAmount(raw.fees) ?? 0;
     const revenue = status === "sold" ? parseAmount(raw.revenue) ?? 0 : 0;
+    const rebate = Math.min(
+      Math.max(0, parseAmount(raw.rebate) ?? 0),
+      Math.max(0, cost),
+    );
     const photos = Array.isArray(raw.photos)
       ? raw.photos
           .map(normalizePhotoMeta)
@@ -596,6 +609,7 @@
       status,
       qty: clampQty(raw.qty),
       cost,
+      rebate,
       revenue,
       fees,
       date,
@@ -661,7 +675,7 @@
     sold.forEach((record) => {
       const profit = profitOf(record);
       revenue += Number(record.revenue) || 0;
-      cost += Number(record.cost) || 0;
+      cost += netCostOf(record);
       fees += Number(record.fees) || 0;
       units += Number(record.qty) || 0;
       totalProfit += profit;
@@ -714,7 +728,7 @@
       count: items.length,
       units: items.reduce((total, item) => total + item.qty, 0),
       cost: roundMoney(
-        items.reduce((total, item) => total + Number(item.cost || 0), 0),
+        items.reduce((total, item) => total + netCostOf(item), 0),
       ),
     };
   }
@@ -865,6 +879,8 @@
     const category = getCategory(record.category);
     const sold = record.status === "sold";
     const profit = profitOf(record);
+    const netCost = netCostOf(record);
+    const rebate = rebateOf(record);
     const photoCount = Array.isArray(record.photos) ? record.photos.length : 0;
     const qtyNote =
       sold && record.qty > 1
@@ -873,6 +889,9 @@
     const photoNote = photoCount
       ? `<span class="meta-dot"></span><span class="record-photo-badge">${ICONS.image}${photoCount}</span>`
       : "";
+    const rebateNote = rebate
+      ? `<span class="meta-dot"></span><span class="rebate-pill">返利 ${formatMoney(rebate)}</span>`
+      : "";
     return `<button class="record-row" type="button" data-action="edit" data-id="${esc(record.id)}" aria-label="编辑 ${esc(record.name)}">
       <span class="record-glyph ${category.className}" aria-hidden="true">${category.char}</span>
       <span class="record-main">
@@ -880,7 +899,8 @@
         <span class="record-meta">
           <span>${formatShortDate(record.date)}</span>
           <span class="meta-dot"></span>
-          <span>成本 ${formatMoney(record.cost)}</span>
+          <span>${rebate ? "净成本" : "成本"} ${formatMoney(netCost)}</span>
+          ${rebateNote}
           ${qtyNote}
           ${photoNote}
           ${sold ? "" : `<span class="meta-dot"></span><span class="stock-pill">在售</span>`}
@@ -891,7 +911,7 @@
           sold
             ? `<span class="record-value ${profit < 0 ? "is-negative" : ""}">${formatMoney(profit, { sign: true })}</span>
                <span class="record-sub">卖价 ${formatMoney(record.revenue)}</span>`
-            : `<span class="record-value is-stock">${formatMoney(record.cost)}</span>
+            : `<span class="record-value is-stock">${formatMoney(netCost)}</span>
                <span class="record-sub">占用成本</span>`
         }
       </span>
@@ -901,6 +921,7 @@
   function stockCard(record) {
     const category = getCategory(record.category);
     const photoCount = Array.isArray(record.photos) ? record.photos.length : 0;
+    const rebate = rebateOf(record);
     return `<article class="stock-card">
       <button class="stock-card-main" type="button" data-action="edit" data-id="${esc(record.id)}" aria-label="查看 ${esc(record.name)}">
         <div class="stock-card-top">
@@ -908,7 +929,7 @@
           <span class="stock-days">${stockDaysText(record.date)}</span>
         </div>
         <h3 class="stock-name">${esc(record.name)}</h3>
-        <p class="stock-cost">${record.qty} 件 · 成本 <b>${formatMoney(record.cost)}</b>${photoCount ? `<span class="stock-photo-badge">${ICONS.image}${photoCount}</span>` : ""}</p>
+        <p class="stock-cost">${record.qty} 件 · 成本 <b>${formatMoney(netCostOf(record))}</b>${rebate ? ` · 返利 ${formatMoney(rebate)}` : ""}${photoCount ? `<span class="stock-photo-badge">${ICONS.image}${photoCount}</span>` : ""}</p>
       </button>
       <div class="stock-card-bottom">
         <span class="stock-status">在售中</span>
@@ -978,7 +999,7 @@
       <p class="profit-caption">${caption}</p>
       <div class="profit-stats">
         <div class="profit-stat"><span>营收</span><b>${formatMoney(summary.revenue)}</b></div>
-        <div class="profit-stat"><span>成本</span><b>${formatMoney(summary.cost)}</b></div>
+        <div class="profit-stat"><span>净成本</span><b>${formatMoney(summary.cost)}</b></div>
         <div class="profit-stat"><span>费用</span><b>${formatMoney(summary.fees)}</b></div>
       </div>
     </section>
@@ -1062,7 +1083,7 @@
     const stockCost = roundMoney(
       filtered
         .filter((record) => record.status === "stock")
-        .reduce((total, record) => total + record.cost, 0),
+        .reduce((total, record) => total + netCostOf(record), 0),
     );
     if (sold.length) {
       const profit = roundMoney(
@@ -1114,7 +1135,7 @@
         const stockCost = roundMoney(
           items
             .filter((record) => record.status === "stock")
-            .reduce((total, record) => total + record.cost, 0),
+            .reduce((total, record) => total + netCostOf(record), 0),
         );
         const meta = sold.length
           ? `${sold.length} 笔已售 · ${profit < 0 ? "亏损" : "净赚"} ${formatMoney(Math.abs(profit))}`
@@ -1153,7 +1174,7 @@
         <p>已卖出的账目才算进当月利润${stockCopy}。先记一单，数据就活了。</p>
         <button class="empty-action" type="button" data-action="new">＋ 记一单</button>
       </div>
-      <p class="formula-note">${ICONS.info}<span>利润 = 卖出收入 − 拿货成本 − 其他费用。在售库存只占成本，不计入当月利润。</span></p>`;
+      <p class="formula-note">${ICONS.info}<span>利润 = 卖出收入 − 拿货成本 − 其他费用 + 平台返利。在售库存只占返利后成本，不计入当月利润。</span></p>`;
     } else {
       const maxWeek = Math.max(
         1,
@@ -1245,7 +1266,7 @@
           : ""
       }
 
-      <p class="formula-note">${ICONS.info}<span>只统计已卖出账目。利润 = 卖出收入 − 拿货成本 − 其他费用；在售库存不计入利润。</span></p>`;
+      <p class="formula-note">${ICONS.info}<span>只统计已卖出账目。利润 = 卖出收入 − 拿货成本 − 其他费用 + 平台返利；在售库存不计入利润。</span></p>`;
     }
 
     return `<section class="page-head">
@@ -1769,6 +1790,7 @@
           : ""
         : "";
     const fees = record ? inputValue(record.fees, true) : "";
+    const rebate = record ? inputValue(record.rebate, true) : "";
     const date = isSell ? todayISO() : record ? record.date : todayISO();
     const note = record ? record.note : "";
     const kicker = isSell
@@ -1891,6 +1913,26 @@
           </div>
 
           <div class="form-section">
+            <div class="inline-grid">
+              <div class="field">
+                <label class="field-label" for="entryRebate">平台返利 <span>降低拿货成本</span></label>
+                <div class="money-input-wrap">
+                  <span class="currency-prefix" aria-hidden="true">¥</span>
+                  <input class="field-input money-input money-soft" id="entryRebate" name="rebate" type="text" inputmode="decimal" autocomplete="off" placeholder="返利、补贴" value="${esc(rebate)}" aria-describedby="entryRebateError">
+                </div>
+                <div class="field-error" id="entryRebateError">返利要填数字，且不能大于拿货成本</div>
+              </div>
+              <div class="field">
+                <span class="field-label">返利后成本 <span>自动算</span></span>
+                <div class="rebate-summary" id="rebateSummary">
+                  <span>净成本</span>
+                  <b id="rebateNetCost">—</b>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-section">
             <label class="field-label" for="entryDate" id="dateLabelText">${isStock ? "入库日期" : isSell ? "卖出日期" : "成交日期"}</label>
             <input class="field-input date-input" id="entryDate" name="date" type="date" value="${esc(date)}" max="${todayISO()}">
             <div class="field-error" id="entryDateError">选一个有效日期</div>
@@ -1913,7 +1955,7 @@
             </div>
           </div>
 
-          <div class="entry-hint" id="entryHint">${ICONS.info}<span>${isStock ? "先记成本，卖出时在首页点「卖出」补收入，再自动结算利润。" : "利润 = 卖出收入 − 拿货成本 − 其他费用。"}</span></div>
+          <div class="entry-hint" id="entryHint">${ICONS.info}<span>${isStock ? "先记成本，卖出时在首页点「卖出」补收入，再自动结算利润。" : "利润 = 卖出收入 − 拿货成本 − 其他费用 + 平台返利。"}</span></div>
         </div>
 
         <div class="sheet-footer">
@@ -1956,6 +1998,7 @@
             cost: prefill.cost != null ? prefill.cost : "",
             revenue: prefill.revenue != null ? prefill.revenue : "",
             fees: prefill.fees != null ? prefill.fees : "",
+            rebate: prefill.rebate != null ? prefill.rebate : "",
             date: todayISO(),
             note: String(prefill.note || "").slice(0, 200),
           }
@@ -2095,7 +2138,7 @@
         ? "先记成本，卖出时再补收入；库存不计入当月利润。"
         : "填好卖价，保存后自动算利润。";
     if (entryHint)
-      entryHint.innerHTML = `${ICONS.info}<span>${isStock ? "先记成本，卖出时在首页点「卖出」补收入，再自动结算利润。" : "利润 = 卖出收入 − 拿货成本 − 其他费用。"}</span>`;
+      entryHint.innerHTML = `${ICONS.info}<span>${isStock ? "先记成本，卖出时在首页点「卖出」补收入，再自动结算利润。" : "利润 = 卖出收入 − 拿货成本 − 其他费用 + 平台返利。"}</span>`;
     if (liveLabel) liveLabel.textContent = isStock ? "占用成本" : "这单净赚";
     updateLivePreview();
   }
@@ -2145,15 +2188,29 @@
     const costInput = $("#entryCost");
     const revenueInput = $("#entryRevenue");
     const feesInput = $("#entryFees");
+    const rebateInput = $("#entryRebate");
     if (!costInput || !feesInput) return;
 
     const feesRaw = feesInput.value.trim();
     const fees = feesRaw === "" ? 0 : parseAmount(feesRaw);
     const cost = parseAmount(costInput.value);
+    const rebateRaw = rebateInput ? rebateInput.value.trim() : "";
+    const rebate = rebateRaw === "" ? 0 : parseAmount(rebateRaw);
+    const netCost =
+      cost !== null && rebate !== null ? roundMoney(cost - rebate) : null;
+    const netCostLabel = $("#rebateNetCost");
+    if (netCostLabel) {
+      netCostLabel.textContent =
+        netCost !== null && netCost >= 0 ? formatMoney(netCost) : "—";
+    }
     const isStock = sheetState.status === "stock";
 
-    if (fees === null) {
-      setLiveValue("费用有误", "muted");
+    if (fees === null || rebate === null) {
+      setLiveValue(fees === null ? "费用有误" : "返利有误", "muted");
+      return;
+    }
+    if (cost !== null && rebate > cost) {
+      setLiveValue("返利超成本", "muted");
       return;
     }
 
@@ -2161,7 +2218,7 @@
       if (cost === null) {
         setLiveValue("待填成本", "muted");
       } else {
-        setLiveValue(formatMoney(cost), "neutral");
+        setLiveValue(formatMoney(netCost), "neutral");
       }
       return;
     }
@@ -2179,7 +2236,7 @@
       setLiveValue("待填卖价", "muted");
       return;
     }
-    const profit = roundMoney(revenue - cost - fees);
+    const profit = roundMoney(revenue - cost - fees + rebate);
     setLiveValue(
       formatMoney(profit, { sign: true }),
       profit < 0 ? "negative" : profit === 0 ? "neutral" : "positive",
@@ -2195,12 +2252,14 @@
     const costInput = $("#entryCost");
     const revenueInput = $("#entryRevenue");
     const feesInput = $("#entryFees");
+    const rebateInput = $("#entryRebate");
     const nameInput = $("#entryName");
     const dateInput = $("#entryDate");
     const noteInput = $("#entryNote");
     if (
       !costInput ||
       !feesInput ||
+      !rebateInput ||
       !nameInput ||
       !dateInput ||
       !noteInput ||
@@ -2243,6 +2302,26 @@
       );
     }
 
+    const rebateRaw = rebateInput.value.trim();
+    const rebate = rebateRaw === "" ? 0 : parseAmount(rebateRaw);
+    if (rebate === null) {
+      fail(
+        showFieldError(
+          "entryRebate",
+          "entryRebateError",
+          "返利要填数字，没有就留空",
+        ),
+      );
+    } else if (cost !== null && rebate > cost) {
+      fail(
+        showFieldError(
+          "entryRebate",
+          "entryRebateError",
+          "返利不能大于拿货成本",
+        ),
+      );
+    }
+
     const isStock = sheetState.status === "stock";
     let revenue = 0;
     if (!isStock) {
@@ -2273,7 +2352,7 @@
       return;
     }
 
-    if (cost === null || fees === null) return;
+    if (cost === null || fees === null || rebate === null) return;
 
     const existing = sheetState.id ? getRecord(sheetState.id) : null;
     if ((sheetState.mode === "edit" || sheetState.mode === "sell") && !existing) {
@@ -2289,6 +2368,7 @@
       status: isStock ? "stock" : "sold",
       qty: sheetState.qty,
       cost,
+      rebate,
       revenue: isStock ? 0 : revenue,
       fees,
       date,
@@ -2334,7 +2414,7 @@
     haptic();
     const profit = profitOf(savedRecord);
     const toastMessage = isStock
-      ? `已存入在售 · 占用 ${formatMoney(savedRecord.cost)}`
+      ? `已存入在售 · 占用 ${formatMoney(netCostOf(savedRecord))}`
       : mode === "sell"
         ? profit >= 0
           ? `卖出成功 · 净赚 ${formatMoney(profit, { sign: true })}`
@@ -2822,7 +2902,7 @@
     }
     const best = summary.best;
     return {
-      text: `${range.label}最赚的是「${best.name}」：卖价 ${formatMoney(best.revenue)}，成本 ${formatMoney(best.cost)}，费用 ${formatMoney(best.fees)}，净赚 ${formatMoney(summary.bestProfit, { sign: true })}。`,
+      text: `${range.label}最赚的是「${best.name}」：卖价 ${formatMoney(best.revenue)}，净成本 ${formatMoney(netCostOf(best))}${rebateOf(best) ? `（含返利 ${formatMoney(rebateOf(best))}）` : ""}，费用 ${formatMoney(best.fees)}，净赚 ${formatMoney(summary.bestProfit, { sign: true })}。`,
       actions: [{ label: "打开统计", type: "navigate", route: "stats" }],
     };
   }
@@ -2834,10 +2914,11 @@
     const sample = sold[0];
     let example = "";
     if (sample) {
-      example = `\n拿最近一单「${sample.name}」举例：${formatMoney(sample.revenue)} − ${formatMoney(sample.cost)}${sample.fees ? ` − ${formatMoney(sample.fees)}` : ""} = ${formatMoney(profitOf(sample), { sign: true })}。`;
+      const rebate = rebateOf(sample);
+      example = `\n拿最近一单「${sample.name}」举例：${formatMoney(sample.revenue)} − ${formatMoney(sample.cost)}${sample.fees ? ` − ${formatMoney(sample.fees)}` : ""}${rebate ? ` + ${formatMoney(rebate)}` : ""} = ${formatMoney(profitOf(sample), { sign: true })}。`;
     }
     return {
-      text: `利润 = 卖出收入 − 拿货成本 − 其他费用。${example}\n在售库存只算占用成本，不算利润；统计按卖出日期归到当月。`,
+      text: `利润 = 卖出收入 − 拿货成本 − 其他费用 + 平台返利。${example}\n在售库存只算返利后成本，不算利润；统计按卖出日期归到当月。`,
       actions: [],
     };
   }
@@ -2889,6 +2970,7 @@
       revenue:
         /(?:卖出收入|卖价|售价|卖出价|卖出|卖了|卖|收入|成交价|出手价|回款)\s*(?:是|为|[:：])?\s*[¥￥]?\s*(\d[\d,]*(?:\.\d{1,2})?)/,
       fees: /(?:其他费用|费用|手续费|平台费|运费|路费|邮费)\s*(?:是|为|[:：])?\s*[¥￥]?\s*(\d[\d,]*(?:\.\d{1,2})?)/,
+      rebate: /(?:平台返利|返利|补贴|返现)\s*(?:是|为|[:：])?\s*[¥￥]?\s*(\d[\d,]*(?:\.\d{1,2})?)/,
       qty: /(?:(?:数量|共|一共|买了|收了)\s*(?:是|为|[:：])?\s*(\d{1,3})\s*(?:件|张|个|双|台|套|份)?|(\d{1,3})\s*(?:件|张|个|双|台|套|份))/,
     };
     const matched = [];
@@ -2917,7 +2999,7 @@
       )
       .replace(/(?:商品名|商品名称|名称|品名|叫)\s*[:：]?\s*/g, "")
       .replace(
-        /(?:拿货成本|成本|进价|收价|本钱|本金|卖出收入|卖价|售价|收入|成交价|费用|手续费|平台费|运费|路费|邮费)\s*[:：]?/g,
+        /(?:拿货成本|成本|进价|收价|本钱|本金|卖出收入|卖价|售价|收入|成交价|费用|手续费|平台费|运费|路费|邮费|平台返利|返利|补贴|返现)\s*[:：]?/g,
         " ",
       )
       .replace(/[元块]/g, " ")
@@ -2942,12 +3024,13 @@
     }
     if (prefill.qty && prefill.qty > 1) parts.push(`数量 ${prefill.qty}`);
     if (prefill.fees) parts.push(`费用 ${formatMoney(prefill.fees)}`);
+    if (prefill.rebate) parts.push(`平台返利 ${formatMoney(prefill.rebate)}`);
     let replyText;
     if (parts.length) {
       replyText = `我先帮你把${stockIntent ? "库存单" : "单子"}填上：${parts.join("，")}。核对一下分类和日期，保存就入账。`;
       if (!stockIntent && prefill.cost != null && prefill.revenue != null) {
         const profit = roundMoney(
-          prefill.revenue - prefill.cost - (prefill.fees || 0),
+          prefill.revenue - prefill.cost - (prefill.fees || 0) + (prefill.rebate || 0),
         );
         replyText += `\n按这几个数算，这单净赚 ${formatMoney(profit, { sign: true })}。`;
       }
@@ -3406,7 +3489,7 @@
     openModal({
       title: "w记账怎么用",
       message: "一分钟看懂，之后照着记就行。",
-      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡上点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情，点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号；剪贴板被限制时会自动出现粘贴框。普通京东买家没有官方订单 API，这是本机文字解析，不上传。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用。在售库存只算占用成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
+      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡上点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情，点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号；剪贴板被限制时会自动出现粘贴框。普通京东买家没有官方订单 API，这是本机文字解析，不上传。<br><br><b>平台返利</b><br>返利会从拿货成本里扣，利润自动加回来；返利不能大于拿货成本。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用 + 平台返利。在售库存只算返利后成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
       confirmText: "知道了",
       single: true,
       icon: "info",
@@ -3537,6 +3620,8 @@
       "分类",
       "数量",
       "拿货成本",
+      "平台返利",
+      "返利后成本",
       "卖出收入",
       "其他费用",
       "利润",
@@ -3554,6 +3639,8 @@
           csvCell(record.category),
           csvCell(record.qty, true),
           csvCell(record.cost.toFixed(2), true),
+          csvCell(rebateOf(record).toFixed(2), true),
+          csvCell(netCostOf(record).toFixed(2), true),
           csvCell(sold ? record.revenue.toFixed(2) : "", true),
           csvCell(record.fees.toFixed(2), true),
           csvCell(sold ? profitOf(record).toFixed(2) : "", true),
