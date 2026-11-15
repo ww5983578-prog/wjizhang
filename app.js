@@ -7,7 +7,7 @@
 
   const STORAGE_KEY = "niuzhangben.ledger.v1"; // legacy key: keep existing local data
   const ASSISTANT_PREF_KEY = "wjizhang.assistant.hidden.v1";
-  const APP_VERSION = "1.5.0";
+  const APP_VERSION = "1.5.1";
   const MAX_AMOUNT = 99999999;
   const MAX_QTY = 999;
   const MAX_PHOTOS = 6;
@@ -875,7 +875,7 @@
     </section>`;
   }
 
-  function recordRow(record) {
+  function recordRow(record, options = {}) {
     const category = getCategory(record.category);
     const sold = record.status === "sold";
     const profit = profitOf(record);
@@ -892,7 +892,7 @@
     const rebateNote = rebate
       ? `<span class="meta-dot"></span><span class="rebate-pill">返利 ${formatMoney(rebate)}</span>`
       : "";
-    return `<button class="record-row" type="button" data-action="edit" data-id="${esc(record.id)}" aria-label="编辑 ${esc(record.name)}">
+    const row = `<button class="record-row" type="button" data-action="edit" data-id="${esc(record.id)}" aria-label="编辑 ${esc(record.name)}">
       <span class="record-glyph ${category.className}" aria-hidden="true">${category.char}</span>
       <span class="record-main">
         <span class="record-name">${esc(record.name)}</span>
@@ -903,7 +903,7 @@
           ${rebateNote}
           ${qtyNote}
           ${photoNote}
-          ${sold ? "" : `<span class="meta-dot"></span><span class="stock-pill">在售</span>`}
+          ${sold || options.ledgerSell ? "" : `<span class="meta-dot"></span><span class="stock-pill">在售</span>`}
         </span>
       </span>
       <span class="record-side">
@@ -916,6 +916,13 @@
         }
       </span>
     </button>`;
+    if (!options.ledgerSell || sold) return row;
+    return `<div class="record-row-wrap">
+      ${row}
+      <button class="ledger-sell-btn" type="button" data-action="sell" data-id="${esc(record.id)}" aria-label="卖出 ${esc(record.name)}">
+        ${ICONS.arrowUpRight}<span>卖出</span>
+      </button>
+    </div>`;
   }
 
   function stockCard(record) {
@@ -976,7 +983,7 @@
             </button>
           </div>
           <div class="record-panel">
-            ${recent.map(recordRow).join("")}
+            ${recent.map((record) => recordRow(record)).join("")}
             ${records.length > recent.length ? `<div class="record-panel-note">只显示最近 ${recent.length} 笔 · 共 ${records.length} 笔</div>` : ""}
           </div>
         </section>`
@@ -1145,7 +1152,7 @@
             <h3>${formatMonthTitle(month)}</h3>
             <span>${meta}</span>
           </div>
-          <div class="record-panel">${items.map(recordRow).join("")}</div>
+          <div class="record-panel">${items.map((record) => recordRow(record, { ledgerSell: true })).join("")}</div>
         </section>`;
       })
       .join("");
@@ -3489,7 +3496,7 @@
     openModal({
       title: "w记账怎么用",
       message: "一分钟看懂，之后照着记就行。",
-      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡上点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情，点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号；剪贴板被限制时会自动出现粘贴框。普通京东买家没有官方订单 API，这是本机文字解析，不上传。<br><br><b>平台返利</b><br>返利会从拿货成本里扣，利润自动加回来；返利不能大于拿货成本。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用 + 平台返利。在售库存只算返利后成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
+      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡，或账本页在售行右侧点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情，点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号；剪贴板被限制时会自动出现粘贴框。普通京东买家没有官方订单 API，这是本机文字解析，不上传。<br><br><b>平台返利</b><br>返利会从拿货成本里扣，利润自动加回来；返利不能大于拿货成本。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用 + 平台返利。在售库存只算返利后成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
       confirmText: "知道了",
       single: true,
       icon: "info",
