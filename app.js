@@ -8,7 +8,7 @@
   const STORAGE_KEY = "niuzhangben.ledger.v1"; // legacy key: keep existing local data
   const ASSISTANT_PREF_KEY = "wjizhang.assistant.hidden.v1";
   const AI_CONFIG_KEY = "wjizhang.ai.v1";
-  const APP_VERSION = "1.6.0";
+  const APP_VERSION = "1.7.0";
   const MAX_AMOUNT = 99999999;
   const MAX_QTY = 999;
   const MAX_PHOTOS = 6;
@@ -33,8 +33,8 @@
   const AI_PRESETS = Object.freeze({
     deepseek: {
       label: "DeepSeek",
-      baseUrl: "https://api.deepseek.com/v1",
-      model: "deepseek-chat",
+      baseUrl: "https://api.deepseek.com",
+      model: "deepseek-flash",
     },
     openai: {
       label: "OpenAI",
@@ -1329,13 +1329,27 @@
 
   function normalizeAiConfig(raw) {
     const source = raw && typeof raw === "object" ? raw : {};
+    let baseUrl = String(source.baseUrl || "")
+      .trim()
+      .replace(/\/+$/, "")
+      .slice(0, 300);
+    let model = String(source.model || "").trim().slice(0, 120);
+    // DeepSeek moved to the Flash / V4 model names. Keep old saved presets usable.
+    if (/^https:\/\/api\.deepseek\.com(?:\/v1)?$/i.test(baseUrl)) {
+      baseUrl = "https://api.deepseek.com";
+      if (
+        !model ||
+        model === "deepseek-chat" ||
+        model === "deepseek-reasoner" ||
+        model === "deepseek-v4-flash-vision-exp"
+      ) {
+        model = "deepseek-flash";
+      }
+    }
     return {
       enabled: source.enabled === true,
-      baseUrl: String(source.baseUrl || "")
-        .trim()
-        .replace(/\/+$/, "")
-        .slice(0, 300),
-      model: String(source.model || "").trim().slice(0, 120),
+      baseUrl,
+      model,
       key: String(source.key || "").trim().slice(0, 500),
       updatedAt: String(source.updatedAt || ""),
     };
@@ -1412,6 +1426,9 @@
     if (error && error.status === 404) {
       return "AI 接口地址或模型名不对（404），请检查设置。";
     }
+    if (error && error.status === 400) {
+      return "AI 接口拒绝了这次请求（400），可能是模型不支持识图，或图片格式不对。";
+    }
     if (error && error.status === 429) {
       return "AI 接口限流或余额不足（429），稍后再试。";
     }
@@ -1440,6 +1457,10 @@
           temperature: options.temperature ?? 0.35,
           max_tokens: options.maxTokens || 700,
           stream: false,
+          ...(options.thinking === "disabled" &&
+          /deepseek/i.test(config.baseUrl)
+            ? { thinking: { type: "disabled" } }
+            : {}),
         }),
         signal: controller.signal,
       });
@@ -1551,6 +1572,278 @@ ${buildAiContextText()}`;
     return { text: content, actions: [], source: "ai" };
   }
 
+  async function prepareAiImage(file) {
+    if (!file || !String(file.type || "").startsWith("image/")) {
+      const error = new Error("请选择一张图片");
+      error.code = "not_image";
+      throw error;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      const error = new Error("图片不能超过 25MB");
+      error.code = "too_large";
+      throw error;
+    }
+    let source = null;
+    let objectUrl = "";
+    try {
+      if (window.createImageBitmap) {
+        try {
+          source = await createImageBitmap(file);
+        } catch (error) {
+          source = null;
+        }
+      }
+      if (!source) {
+        objectUrl = URL.createObjectURL(file);
+        source = await new Promise((resolve, reject) => {
+          const image = new Image();
+          image.onload = () => resolve(image);
+          image.onerror = () => reject(new Error("图片打不开"));
+          image.src = objectUrl;
+        });
+      }
+      const width = source.width || source.naturalWidth;
+      const height = source.height || source.naturalHeight;
+      if (!width || !height) throw new Error("图片尺寸不对");
+      const maxSide = 2200;
+      const scale = Math.min(1, maxSide / Math.max(width, height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("浏览器不支持图片处理");
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(source, 0, 0, canvas.width, canvas.height);
+      let dataUrl = canvas.toDataURL("image/jpeg", 0.9);
+      if (dataUrl.length > 8 * 1024 * 1024) {
+        dataUrl = canvas.toDataURL("image/jpeg", 0.72);
+      }
+      return dataUrl;
+    } finally {
+      if (source && source.close) source.close();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    }
+  }
+
+  function aiAmount(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const cleaned = String(value)
+      .replace(/[¥￥,，\s]/g, "")
+      .replace(/[^\d.-]/g, "");
+    const number = Number(cleaned);
+    if (!Number.isFinite(number)) return null;
+    return Math.max(0, Math.min(MAX_AMOUNT, roundMoney(number)));
+  }
+
+  function parseAiEntryJson(text) {
+    let value = String(text || "").trim();
+    value = value.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/i, "").trim();
+    const start = value.indexOf("{");
+    const end = value.lastIndexOf("}");
+    if (start < 0 || end <= start) throw new Error("AI did not return JSON");
+    const parsed = JSON.parse(value.slice(start, end + 1));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("AI JSON is not an object");
+    }
+    return parsed;
+  }
+
+  function normalizeAiEntry(raw) {
+    const source = raw && typeof raw === "object" ? raw : {};
+    const cost = aiAmount(source.cost);
+    let rebate = aiAmount(source.rebate);
+    if (rebate === null) rebate = 0;
+    if (cost !== null) rebate = Math.min(rebate, cost);
+    const rawStatus = String(source.status || "").toLowerCase();
+    const status =
+      rawStatus === "sold" ||
+      /卖出|成交|已售|已卖出/.test(String(source.status || ""))
+        ? "sold"
+        : "stock";
+    const rawDate = String(source.date || "").trim();
+    const date =
+      isValidISODate(rawDate) && rawDate <= todayISO() ? rawDate : "";
+    return {
+      name: String(source.name || "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 60),
+      cost,
+      revenue: status === "sold" ? aiAmount(source.revenue) : null,
+      fees: aiAmount(source.fees) ?? 0,
+      rebate,
+      qty: clampQty(source.qty || 1),
+      status,
+      date,
+      note: String(source.note || "").replace(/\s+/g, " ").trim().slice(0, 200),
+      confidence: ["high", "medium", "low"].includes(String(source.confidence))
+        ? String(source.confidence)
+        : "medium",
+      summary: String(source.summary || "").trim().slice(0, 200),
+    };
+  }
+
+  async function requestAiImageEntry(dataUrl) {
+    if (!aiReady()) throw new Error("AI is not configured");
+    if (/deepseek-v4-pro/i.test(aiConfig.model)) {
+      const error = new Error("DeepSeek v4-pro 不支持识图，请把模型改成 deepseek-flash");
+      error.code = "vision_model";
+      throw error;
+    }
+    const prompt = `请识别这张图片，并整理成 w记账 可入账的 JSON。只输出 JSON，不要 Markdown，不要解释。
+JSON 字段：
+{"name":"商品简称","cost":数字或null,"revenue":数字或null,"fees":数字,"rebate":数字,"qty":整数,"status":"stock或sold","date":"YYYY-MM-DD或null","note":"简短备注","confidence":"high/medium/low","summary":"一句话"}
+规则：
+1. name 优先取“数量 ×1, 规格”里的规格，保留品牌、型号、颜色，最多 30 字；不要取店铺名、状态栏、订单编号。
+2. cost 取拿货成本/实付/合计；不要取优惠金额、原价或划线价。如果只看到卖价，cost 填 null。
+3. status：采购、待收货、在售、库存填 stock；卖出、成交、已售填 sold。
+4. revenue 取卖出收入/成交价；没有就 null。fees 是手续费/运费，没有就 0。rebate 是平台返利/补贴，没有就 0。
+5. date 只有截图里明确出现的日期才填，否则 null。note 可以写平台、订单号或颜色，最多 100 字。
+6. 不确定的数字填 null 或 0，绝对不要猜。`;
+    const content = await callAiApi(
+      aiConfig,
+      [
+        {
+          role: "system",
+          content:
+            "你是一个严谨的商品订单 OCR 助手。只提取图片中明确可见的信息，输出合法 JSON。",
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            {
+              type: "image_url",
+              image_url: { url: dataUrl, detail: "high" },
+            },
+          ],
+        },
+      ],
+      { maxTokens: 900, temperature: 0.1, timeoutMs: 60000, thinking: "disabled" },
+    );
+    return normalizeAiEntry(parseAiEntryJson(content));
+  }
+
+  function assistantImageReply(entry) {
+    const parts = [];
+    if (entry.name) parts.push(`商品：${entry.name}`);
+    if (entry.cost !== null) parts.push(`拿货成本：${formatMoney(entry.cost)}`);
+    if (entry.qty > 1) parts.push(`数量：${entry.qty}`);
+    if (entry.fees) parts.push(`费用：${formatMoney(entry.fees)}`);
+    if (entry.rebate) parts.push(`平台返利：${formatMoney(entry.rebate)}`);
+    if (entry.status === "sold" && entry.revenue !== null) {
+      parts.push(`卖出收入：${formatMoney(entry.revenue)}`);
+    }
+    const statusText = entry.status === "sold" ? "已卖出" : "在售库存";
+    const confidenceText =
+      entry.confidence === "low"
+        ? "\n这张图有些字没看清，入账前一定核对。"
+        : "";
+    const summaryText = entry.summary ? `${entry.summary}\n` : "";
+    const actions =
+      entry.name || entry.cost !== null || entry.revenue !== null
+        ? [
+            {
+              label: "核对并入账",
+              type: "entry",
+              status: entry.status,
+              prefill: {
+                name: entry.name,
+                cost: entry.cost !== null ? entry.cost : "",
+                revenue:
+                  entry.status === "sold" && entry.revenue !== null
+                    ? entry.revenue
+                    : "",
+                fees: entry.fees,
+                rebate: entry.rebate,
+                qty: entry.qty,
+                date: entry.date || "",
+                note: entry.note,
+              },
+            },
+          ]
+        : [];
+    if (!parts.length) {
+      return {
+        text: "这张图我没看清商品名和金额，换一张更清晰、能同时看到商品和合计金额的截图试试。",
+        actions: [],
+        source: "ai",
+      };
+    }
+    return {
+      text: `${summaryText}我从图里整理出这是「${statusText}」：\n${parts.join("\n")}${confidenceText}\n点下面的按钮核对，确认后再保存。`,
+      actions,
+      source: "ai",
+    };
+  }
+
+  async function handleAssistantImage(file) {
+    if (assistantLayer.hidden || assistant.typing || !file) return;
+    if (!aiReady()) {
+      showToast("先在「我的 → AI 助手」配置并启用 AI，再发图", "error");
+      return;
+    }
+    const requestId = ++assistant.aiRequestSeq;
+    assistant.typing = true;
+    renderAssistantMessages();
+    try {
+      let dataUrl;
+      try {
+        dataUrl = await prepareAiImage(file);
+      } catch (error) {
+        throw Object.assign(
+          new Error(
+            error && error.code === "too_large"
+              ? "这张图太大，换一张小于 25MB 的截图"
+              : "这张图打不开，换一张 JPG/PNG 截图",
+          ),
+          { code: "image" },
+        );
+      }
+      if (requestId !== assistant.aiRequestSeq) return;
+      assistant.messages.push({
+        id: `a${++assistant.seq}`,
+        role: "user",
+        text: "帮我从这张图记账",
+        image: dataUrl,
+      });
+      renderAssistantMessages();
+
+      const entry = await requestAiImageEntry(dataUrl);
+      if (requestId !== assistant.aiRequestSeq) return;
+      assistant.typing = false;
+      const reply = assistantImageReply(entry);
+      assistant.messages.push({
+        id: `a${++assistant.seq}`,
+        role: "assistant",
+        text: reply.text,
+        actions: reply.actions,
+        source: "ai",
+      });
+      if (!assistantLayer.hidden) renderAssistantMessages();
+    } catch (error) {
+      if (requestId !== assistant.aiRequestSeq) return;
+      assistant.typing = false;
+      const message =
+        error && error.code === "image"
+          ? error.message
+          : error && error.code === "vision_model"
+            ? error.message
+            : error && /JSON|did not return/i.test(error.message || "")
+              ? "AI 看懂了图，但没整理成可入账的数据。换一张更清晰、包含商品名和金额的截图试试。"
+              : `${aiErrorMessage(error)}\n\n识图没有完成，换张图或检查 AI 设置后再试。`;
+      assistant.messages.push({
+        id: `a${++assistant.seq}`,
+        role: "assistant",
+        text: message,
+        actions: [],
+        source: "local",
+      });
+      if (!assistantLayer.hidden) renderAssistantMessages();
+    }
+  }
+
   function shouldUseAi(text) {
     if (!aiReady()) return false;
     const compact = String(text).replace(/\s+/g, "").toLowerCase();
@@ -1605,8 +1898,8 @@ ${buildAiContextText()}`;
               .join("")}
           </select>
         </label>
-        <label class="ai-field"><span>接口地址</span><input id="aiBaseUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://api.deepseek.com/v1" value="${esc(config.baseUrl)}"></label>
-        <label class="ai-field"><span>模型</span><input id="aiModel" type="text" autocomplete="off" placeholder="deepseek-chat" value="${esc(config.model)}"></label>
+        <label class="ai-field"><span>接口地址</span><input id="aiBaseUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://api.deepseek.com" value="${esc(config.baseUrl)}"></label>
+        <label class="ai-field"><span>模型</span><input id="aiModel" type="text" autocomplete="off" placeholder="deepseek-flash" value="${esc(config.model)}"></label>
         <label class="ai-field"><span>API Key</span><input id="aiKey" type="password" autocomplete="new-password" placeholder="${config.key ? "已保存，留空不修改" : "sk-... 只存本机"}" value=""></label>
         <div class="ai-actions">
           <button class="ai-btn is-primary" type="button" data-action="ai-save">保存</button>
@@ -1614,7 +1907,7 @@ ${buildAiContextText()}`;
           <button class="ai-btn" type="button" data-action="ai-clear">清除 Key</button>
         </div>
         <p class="ai-status" id="aiTestStatus">${configured ? "Key 已保存在本机，不在 JSON 备份里。" : "填好接口、模型和 Key，保存后才会启用。"}</p>
-        <p class="ai-hint">Key 只存在这台设备的浏览器里，公共设备不要保存。启用后，提问会把账本摘要发送到你填写的接口；AI 不能直接改账，保存/删除仍由你确认。浏览器直连若被 CORS 拦截，需要改用带后端的代理地址。</p>
+        <p class="ai-hint">Key 只存在这台设备的浏览器里，公共设备不要保存。启用后，提问会把账本摘要、发图会把图片发送到你填写的接口；AI 不能直接改账，保存/删除仍由你确认。发图记账需要支持图片输入的模型，DeepSeek 请用 deepseek-flash。浏览器直连若被 CORS 拦截，需要改用带后端的代理地址。</p>
       </div>
     </div>`;
   }
@@ -2416,7 +2709,7 @@ ${buildAiContextText()}`;
             revenue: prefill.revenue != null ? prefill.revenue : "",
             fees: prefill.fees != null ? prefill.fees : "",
             rebate: prefill.rebate != null ? prefill.rebate : "",
-            date: todayISO(),
+            date: isValidISODate(prefill.date) ? prefill.date : todayISO(),
             note: String(prefill.note || "").slice(0, 200),
           }
         : null);
@@ -2983,7 +3276,10 @@ ${buildAiContextText()}`;
     if (message.role === "user") {
       return `<div class="assistant-msg is-user">
         <div class="assistant-bubble-wrap">
-          <div class="assistant-bubble">${esc(message.text)}</div>
+          <div class="assistant-bubble">
+            ${message.image ? `<img class="assistant-msg-image" src="${esc(message.image)}" alt="待识别图片">` : ""}
+            ${esc(message.text)}
+          </div>
         </div>
       </div>`;
     }
@@ -3020,7 +3316,7 @@ ${buildAiContextText()}`;
           </span>
           <div class="assistant-title-block">
             <div class="assistant-name" id="assistantTitle">奶娃 <span class="${aiOn ? "ai-pill" : "local-pill"}">${aiOn ? "AI" : "本地"}</span></div>
-            <div class="assistant-status"><span class="assistant-status-dot"></span>${aiOn ? (aiOnline ? "AI 远程 · 只发账本摘要" : "AI 已配置 · 离线时用本地") : "看账 · 算账 · 只在本机"}</div>
+            <div class="assistant-status"><span class="assistant-status-dot"></span>${aiOn ? (aiOnline ? "AI 远程 · 账本摘要/图片" : "AI 已配置 · 离线时用本地") : "看账 · 算账 · 只在本机"}</div>
           </div>
         </div>
         <div class="assistant-head-actions">
@@ -3047,15 +3343,19 @@ ${buildAiContextText()}`;
       <div class="assistant-footer">
         <div class="assistant-suggestions" aria-label="快捷问题">
           <button class="assistant-suggestion" type="button" data-assistant-prompt="本月赚了多少">本月赚多少</button>
+          <button class="assistant-suggestion is-action" type="button" data-assistant-image>发图记账</button>
           <button class="assistant-suggestion" type="button" data-assistant-prompt="在售库存">在售库存</button>
-          <button class="assistant-suggestion is-action" type="button" data-assistant-command="entry">记一单</button>
+          <button class="assistant-suggestion" type="button" data-assistant-command="entry">记一单</button>
           <button class="assistant-suggestion" type="button" data-assistant-prompt="利润怎么算">利润怎么算</button>
           <button class="assistant-suggestion" type="button" data-assistant-prompt="怎么备份">怎么备份</button>
         </div>
         <form class="assistant-composer" id="assistantForm" novalidate>
+          <button class="assistant-image-btn" type="button" data-assistant-image aria-label="选择订单截图交给 AI 记账" title="发订单截图，AI 识别后帮你填单（图片会发送给 AI）">${ICONS.image}</button>
+          <input id="assistantImageInput" type="file" accept="image/*" hidden>
           <input id="assistantInput" type="text" maxlength="200" autocomplete="off" enterkeyhint="send" placeholder="问奶娃：本月赚了多少？" aria-label="对奶娃说">
           <button class="assistant-send" id="assistantSend" type="submit" aria-label="发送">${ICONS.send}</button>
         </form>
+        <p class="assistant-image-note">发图会用 AI 识别，识别后先生成单子，核对再保存。</p>
       </div>`;
   }
 
@@ -3632,6 +3932,12 @@ ${buildAiContextText()}`;
         resetAssistant();
         return;
       }
+      if (event.target.closest("[data-assistant-image]")) {
+        event.preventDefault();
+        if (assistant.typing) return;
+        $("#assistantImageInput")?.click();
+        return;
+      }
       const promptButton = event.target.closest("[data-assistant-prompt]");
       if (promptButton) {
         event.preventDefault();
@@ -3665,6 +3971,13 @@ ${buildAiContextText()}`;
       if (event.target.id !== "assistantForm") return;
       event.preventDefault();
       sendAssistantText($("#assistantInput")?.value || "");
+    });
+
+    assistantLayer.addEventListener("change", (event) => {
+      if (event.target.id !== "assistantImageInput") return;
+      const file = event.target.files && event.target.files[0];
+      event.target.value = "";
+      if (file) handleAssistantImage(file);
     });
   }
 
@@ -3933,7 +4246,7 @@ ${buildAiContextText()}`;
     openModal({
       title: "w记账怎么用",
       message: "一分钟看懂，之后照着记就行。",
-      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡，或账本页在售行右侧点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情，点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号；剪贴板被限制时会自动出现粘贴框。普通京东买家没有官方订单 API，这是本机文字解析，不上传。<br><br><b>平台返利</b><br>返利会从拿货成本里扣，利润自动加回来；返利不能大于拿货成本。<br><br><b>AI 助手</b><br>在「我的 → AI 助手」填 OpenAI 兼容接口、模型和 Key 后可接外部 AI；自由分析走 AI，查账/记账仍用本地奶娃。Key 只存本机，不进备份；启用后提问会把账本摘要发到该接口。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用 + 平台返利。在售库存只算返利后成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
+      extraHtml: `<b>记一单</b><br>已卖出：填拿货成本和卖出收入，利润自动算。<br><br><b>先入库</b><br>只记成本；卖出时在首页库存卡，或账本页在售行右侧点“卖出”，补上收入即可。<br><br><b>京东拿货价</b><br>复制京东订单详情，点单子里的「JD 识别」，自动填商品名、实付价、数量和订单号；剪贴板被限制时会自动出现粘贴框。普通京东买家没有官方订单 API，这是本机文字解析，不上传。<br><br><b>平台返利</b><br>返利会从拿货成本里扣，利润自动加回来；返利不能大于拿货成本。<br><br><b>AI 助手</b><br>在「我的 → AI 助手」填 OpenAI 兼容接口、模型和 Key 后可接外部 AI；自由分析走 AI，查账/记账仍用本地奶娃。DeepSeek 用 deepseek-flash，支持在奶娃里点「发图记账」识别订单截图，识别后先生成待确认单子，核对再保存。Key 只存本机，不进备份；启用后提问/发图会把账本摘要或图片发到该接口。<br><br><b>备注图片</b><br>备注下面可以加收据、聊天记录或实物图，最多 6 张；图片压缩后存在本机，导出 JSON 备份会一起打包。<br><br><b>统计规则</b><br>只算已卖出的账目：利润 = 卖出收入 − 成本 − 其他费用 + 平台返利。在售库存只算返利后成本，不计利润。<br><br><b>数据在哪</b><br>账目和图片都在本机浏览器，不上传。换手机或清理浏览器前，先导出 JSON 备份。`,
       confirmText: "知道了",
       single: true,
       icon: "info",

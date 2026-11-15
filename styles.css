@@ -3111,14 +3111,52 @@ body.no-scroll .assistant-dock {
 .assistant-composer {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 5px 5px 5px 12px;
+  gap: 5px;
+  padding: 5px 5px 5px 6px;
   border: 1px solid transparent;
   border-radius: 16px;
   background: var(--surface-2);
   transition:
     background 0.15s ease,
     border-color 0.15s ease;
+}
+
+.assistant-image-btn {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  place-items: center;
+  border-radius: 10px;
+  color: var(--muted);
+}
+
+.assistant-image-btn:active {
+  background: var(--surface-3);
+}
+
+.assistant-image-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.assistant-image-note {
+  margin: 5px 2px 0;
+  color: var(--muted-2);
+  font-size: 8px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.assistant-msg-image {
+  display: block;
+  width: auto;
+  max-width: min(220px, 100%);
+  max-height: 220px;
+  margin-bottom: 6px;
+  border: 1px solid rgba(20, 25, 19, 0.08);
+  border-radius: 11px;
+  object-fit: cover;
 }
 
 .assistant-composer:focus-within {
